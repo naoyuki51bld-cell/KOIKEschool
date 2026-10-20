@@ -1,0 +1,125 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>数学ボード</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/css/app.css">
+</head>
+<body>
+  <main class="auth" id="app">
+    <div class="logo">数学ボード</div>
+    <p class="muted" style="text-align:center" id="class-name"></p>
+    <div id="view"></div>
+  </main>
+  <script src="/js/common.js"></script>
+  <script>
+    const { api, h, $ } = MB;
+    const view = $('#view');
+    const params = new URLSearchParams(location.search);
+
+    function go(role) {
+      location.href = role === 'teacher' ? '/teacher' : '/student';
+    }
+
+    function field(label, input, help) {
+      return h('div', { class: 'field' }, h('label', {}, label, help ? h('div', { class: 'help' }, help) : null), input);
+    }
+
+    function form(onSubmit, ...children) {
+      const error = h('div', { class: 'error', role: 'alert' });
+      const el = h('form', {
+        class: 'card',
+        onsubmit: async (e) => {
+          e.preventDefault();
+          error.textContent = '';
+          const button = el.querySelector('button[type=submit]');
+          button.disabled = true;
+          try {
+            await onSubmit(new FormData(el));
+          } catch (err) {
+            error.textContent = err.message;
+          } finally {
+            button.disabled = false;
+          }
+        },
+      }, ...children, error);
+      return el;
+    }
+
+    function input(name, type = 'text', extra = {}) {
+      return h('input', { name, type, required: true, autocomplete: 'off', ...extra });
+    }
+
+    function setupView() {
+      MB.fill(view, 
+        h('p', {}, '最初に教師用アカウントを作成します。'),
+        form(async (fd) => {
+          await api('POST', '/api/setup', {
+            className: fd.get('className'),
+            name: fd.get('name'),
+            password: fd.get('password'),
+          });
+          go('teacher');
+        },
+        field('クラス名', input('className', 'text', { placeholder: '例：2年3組 数学Ⅱ' })),
+        field('教師の名前（ログイン名）', input('name', 'text', { autocomplete: 'username' })),
+        field('パスワード', input('password', 'password', { autocomplete: 'new-password', minlength: 8 }), '8文字以上'),
+        h('button', { type: 'submit', class: 'primary block' }, '作成してはじめる')),
+      );
+    }
+
+    function authView(status, tab) {
+      const loginForm = form(async (fd) => {
+        const r = await api('POST', '/api/login', { name: fd.get('name'), password: fd.get('password') });
+        go(r.role);
+      },
+      field('名前', input('name', 'text', { autocomplete: 'username' })),
+      field('パスワード', input('password', 'password', { autocomplete: 'current-password' })),
+      h('button', { type: 'submit', class: 'primary block' }, 'ログイン'));
+
+      const registerForm = form(async (fd) => {
+        if (fd.get('password') !== fd.get('password2')) throw new Error('確認用のパスワードが一致しません');
+        await api('POST', '/api/register', {
+          joinCode: fd.get('joinCode'),
+          name: fd.get('name'),
+          number: fd.get('number') || null,
+          password: fd.get('password'),
+        });
+        go('student');
+      },
+      field('参加コード', input('joinCode', 'text', { value: params.get('join') || '', autocapitalize: 'characters', placeholder: '先生が見せている6文字' })),
+      field('表示名（あだ名）', input('name', 'text', { autocomplete: 'username', maxlength: 20 }), '本名ではなく、自分で決めた名前にしてください。ログインに使います'),
+      field('出席番号', h('input', { name: 'number', type: 'number', inputmode: 'numeric', min: 1, max: 999 }), '先生だけが見ます（任意）'),
+      field('パスワード', input('password', 'password', { autocomplete: 'new-password', minlength: 4 }), '4文字以上。忘れたら先生に再設定してもらえます'),
+      field('パスワード（確認）', input('password2', 'password', { autocomplete: 'new-password' })),
+      h('button', { type: 'submit', class: 'primary block' }, '登録してはじめる'));
+
+      const tabs = h('div', { class: 'seg', style: { width: '100%', marginBottom: '12px' } });
+      const show = (which) => {
+        loginForm.classList.toggle('hidden', which !== 'login');
+        registerForm.classList.toggle('hidden', which !== 'register');
+        [...tabs.children].forEach((b) => b.classList.toggle('on', b.dataset.tab === which));
+      };
+      tabs.append(
+        h('button', { 'data-tab': 'login', style: { flex: 1 }, onclick: () => show('login') }, 'ログイン'),
+        status.registrationOpen ? h('button', { 'data-tab': 'register', style: { flex: 1 }, onclick: () => show('register') }, 'はじめての人') : null,
+      );
+      MB.fill(view, tabs, loginForm, registerForm);
+      show(status.registrationOpen ? tab : 'login');
+    }
+
+    (async () => {
+      const status = await api('GET', '/api/status');
+      $('#class-name').textContent = status.className;
+      if (status.needsSetup) return setupView();
+      try {
+        const me = await api('GET', '/api/me');
+        return go(me.role);
+      } catch { /* 未ログイン */ }
+      authView(status, params.get('join') ? 'register' : 'login');
+    })();
+  </script>
+</body>
+</html>

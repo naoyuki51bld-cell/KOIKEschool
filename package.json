@@ -1,0 +1,20 @@
+{
+  "name": "math-board",
+  "version": "1.0.0",
+  "description": "数学の授業用 意見集約・進捗確認アプリ",
+  "main": "server/index.js",
+  "scripts": {
+    "start": "node --no-warnings server/index.js",
+    "test": "node --no-warnings --test test/*.test.js"
+  },
+  "dependencies": {
+    "express": "^5.3.0",
+    "katex": "^0.19.0",
+    "mathjs": "^15.2.0",
+    "qrcode": "^1.5.4"
+  },
+  "private": true,
+  "engines": {
+    "node": ">=22.5"
+  }
+}
