@@ -1,6 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert');
-const { judge } = require('../server/judge');
+const { judge } = require('../public/js/judge');
 
 const value = (...answers) => ({ answers, mode: 'value' });
 

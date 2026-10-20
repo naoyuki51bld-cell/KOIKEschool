@@ -19,15 +19,18 @@
   </div>
   <script src="/vendor/katex/katex.min.js"></script>
   <script src="/vendor/katex/contrib/auto-render.min.js"></script>
+  <script src="/vendor/qrcode.js"></script>
+  <script src="/vendor/firebase.js"></script>
+  <script src="/firebase-config.js"></script>
+  <script src="/js/store.js"></script>
   <script src="/js/common.js"></script>
   <script>
-    const { api, h, $, rich, fileUrl, listen, debounce } = MB;
+    const { h, fill, $, rich, img } = MB;
     const view = $('#view');
     const prefs = { size: 22, cols: 0 };
     try { Object.assign(prefs, JSON.parse(localStorage.getItem('mb-present') || '{}')); } catch { /* 無視 */ }
     let showQr = false;
-    let data = null;
-    let qrSvg = '';
+    let store = null;
 
     function applyPrefs() {
       document.documentElement.style.setProperty('--present-size', `${prefs.size}px`);
@@ -38,62 +41,67 @@
       return [
         s.shortAnswer ? h('div', { style: { fontSize: '1.4em', fontWeight: 800 } }, s.shortAnswer) : null,
         s.text ? rich(s.text) : null,
-        s.drawing ? h('img', { class: 'answer-image', src: fileUrl(s.drawing), alt: '手書き' }) : null,
-        s.photo ? h('img', { class: 'answer-image', src: fileUrl(s.photo), alt: '写真' }) : null,
+        s.drawing ? img(s.drawing, { class: 'answer-image', alt: '手書き' }) : null,
+        s.photo ? img(s.photo, { class: 'answer-image', alt: '写真' }) : null,
       ];
     }
 
-    function zoom(s) {
+    function zoom(label, s) {
       const el = h('div', { class: 'zoom', onclick: () => el.remove() },
-        h('div', { style: { fontWeight: 800, color: 'var(--accent)', marginBottom: '12px' } }, s.label), ...answerBody(s));
+        h('div', { style: { fontWeight: 800, color: 'var(--accent)', marginBottom: '12px' } }, label), ...answerBody(s));
       document.body.append(el);
     }
 
-    function render() {
-      if (!data) return;
-      const subs = data.submissions;
-      const cols = prefs.cols || (subs.length <= 1 ? 1 : subs.length <= 4 ? 2 : subs.length <= 6 ? 3 : 4);
-      view.style.setProperty('--cols', cols);
-      const join = (showQr || data.showQr)
-        ? h('div', { class: 'card join' },
-          h('div', { class: 'qr', style: { width: '220px', height: '220px' } }),
-          h('div', {}, h('div', { class: 'muted' }, '参加コード'), h('div', { class: 'code-big', style: { fontSize: '3em' } }, data.joinCode),
-            h('div', { class: 'muted' }, location.origin)))
-        : null;
-      if (join) join.querySelector('.qr').innerHTML = qrSvg;
-      MB.fill(view, 
-        join,
-        data.task
-          ? h('div', { class: 'card ptask' }, h('h1', {}, data.task.title), rich(data.task.body),
-            data.task.image ? h('img', { class: 'task-image', src: fileUrl(data.task.image), style: { maxHeight: '35vh' } }) : null,
-            data.task.hint ? h('div', { class: 'hint' }, h('strong', {}, 'ヒント'), rich(data.task.hint)) : null)
-          : (join ? null : h('div', { class: 'card muted' }, '先生の画面の「回答」タブで「提示に選ぶ」を押すと、ここに表示されます。')),
-        subs.length ? h('div', { class: 'pgrid' }, subs.map((s) => h('div', { class: 'panswer', onclick: () => zoom(s) },
-          h('div', { class: 'label' }, s.label), ...answerBody(s)))) : null);
+    function joinBox() {
+      const code = store.state.settings.joinCode;
+      const url = `${location.origin}/?join=${encodeURIComponent(code)}`;
+      const qr = window.qrcode(0, 'M');
+      qr.addData(url);
+      qr.make();
+      const box = h('div', { class: 'qr', style: { width: '220px', height: '220px' } });
+      box.innerHTML = qr.createSvgTag({ cellSize: 4, margin: 2, scalable: true });
+      return h('div', { class: 'card join' }, box,
+        h('div', {}, h('div', { class: 'muted' }, '参加コード'), h('div', { class: 'code-big', style: { fontSize: '3em' } }, code),
+          h('div', { class: 'muted' }, location.origin)));
     }
 
-    const load = debounce(async () => {
-      try {
-        data = await api('GET', '/api/teacher/present/view');
-      } catch (e) {
-        if (e.status === 401 || e.status === 403) location.href = '/';
-        return;
-      }
-      if ((showQr || data.showQr) && !qrSvg) qrSvg = await fetch('/api/teacher/join-qr.svg').then((r) => r.text());
-      render();
-    }, 200);
+    function render() {
+      const p = store.state.present;
+      const task = p.taskId ? store.state.tasks.get(p.taskId) : null;
+      const subs = task ? store.submissionsOf(task.id) : [];
+      const chosen = task ? (p.submissionKeys || []).map((k) => subs.find((s) => s.path === k)).filter(Boolean) : [];
+      const cols = prefs.cols || (chosen.length <= 1 ? 1 : chosen.length <= 4 ? 2 : chosen.length <= 6 ? 3 : 4);
+      view.style.setProperty('--cols', cols);
+      const join = showQr || p.showQr ? joinBox() : null;
+      fill(view,
+        join,
+        task
+          ? h('div', { class: 'card ptask' }, h('h1', {}, task.title), rich(task.body),
+            task.imageV ? img({ path: `tasks/${task.id}/files/image`, v: task.imageV }, { class: 'task-image', style: { maxHeight: '35vh' } }) : null,
+            task.hint ? h('div', { class: 'hint' }, h('strong', {}, 'ヒント'), rich(task.hint)) : null)
+          : (join ? null : h('div', { class: 'card muted' }, '先生の画面の「回答」タブで「提示に選ぶ」を押すと、ここに表示されます。')),
+        chosen.length ? h('div', { class: 'pgrid' }, chosen.map((s, i) => {
+          const label = p.showNames ? s.ownerName : `回答 ${String.fromCharCode(65 + i)}`;
+          return h('div', { class: 'panswer', onclick: () => zoom(label, s) }, h('div', { class: 'label' }, label), ...answerBody(s));
+        })) : null);
+    }
 
     $('#smaller').onclick = () => { prefs.size = Math.max(14, prefs.size - 2); applyPrefs(); };
     $('#bigger').onclick = () => { prefs.size = Math.min(48, prefs.size + 2); applyPrefs(); };
     $('#cols').onclick = () => { prefs.cols = (prefs.cols + 1) % 5; applyPrefs(); render(); };
-    $('#qr').onclick = () => { showQr = !showQr; load(); };
+    $('#qr').onclick = () => { showQr = !showQr; render(); };
     $('#full').onclick = () => (document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen());
 
     applyPrefs();
-    load();
-    listen((e) => {
-      if (['present', 'submission', 'tasks', 'resume', 'settings'].includes(e.type)) load();
-    });
+    (async () => {
+      const who = await window.Store.whoami();
+      if (who.role !== 'teacher') {
+        location.href = '/';
+        return;
+      }
+      store = window.Store.teacherStore(who);
+      store.on(() => { if (store.state.ready) render(); });
+    })();
   </script>
 </body>
 </html>

@@ -1,20 +1,27 @@
 {
   "name": "math-board",
   "version": "1.0.0",
-  "description": "数学の授業用 意見集約・進捗確認アプリ",
-  "main": "server/index.js",
+  "description": "数学の授業用 意見集約・進捗確認アプリ（Firebase）",
   "scripts": {
-    "start": "node --no-warnings server/index.js",
-    "test": "node --no-warnings --test test/*.test.js"
+    "build": "node scripts/build.js",
+    "dev": "npm run build && firebase emulators:start --project demo-math-board",
+    "test": "node --no-warnings --test test/judge.test.js && npm run test:rules",
+    "test:rules": "firebase emulators:exec --only firestore --project demo-math-board \"node --no-warnings --test test/rules.test.js\"",
+    "deploy": "npm run build && firebase deploy --only hosting,firestore"
   },
   "dependencies": {
-    "express": "^5.3.0",
+    "firebase": "^12.19.0",
     "katex": "^0.19.0",
     "mathjs": "^15.2.0",
-    "qrcode": "^1.5.4"
+    "qrcode-generator": "^2.0.4"
   },
   "private": true,
   "engines": {
-    "node": ">=22.5"
+    "node": ">=20"
+  },
+  "devDependencies": {
+    "@firebase/rules-unit-testing": "^5.0.2",
+    "esbuild": "^0.28.2",
+    "firebase-tools": "^15.33.0"
   }
 }

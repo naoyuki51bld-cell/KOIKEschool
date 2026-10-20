@@ -207,7 +207,9 @@
         out.width = W;
         out.height = H;
         paintAll(out.getContext('2d'));
-        finish(out.toDataURL('image/png'));
+        // たくさん描いて PNG が大きくなったときは JPEG にする（1つの文書に入る大きさに）
+        const png = out.toDataURL('image/png');
+        finish(png.length < 600 * 1024 ? png : out.toDataURL('image/jpeg', 0.85));
       }
 
       refreshTools();

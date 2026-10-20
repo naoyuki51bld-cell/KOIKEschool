@@ -1,7 +1,7 @@
 (function () {
-  const { api, h, $, toast, rich, fileUrl, modal, compressImage, listen, debounce, statusBadge } = MB;
+  const { h, fill, $, toast, rich, img, modal, compressImage, debounce, statusBadge } = MB;
   const view = $('#view');
-  let me = null;
+  let store = null;
   let current = null; // 開いている課題の画面の状態
 
   const SYMBOLS = ['√', '²', '³', '^', 'π', '±', '×', '÷', '≦', '≧', '≠', '∠', '△', '°', '⊥', '∥', '∞', 'θ', '∴', '∵', '⇒', '⇔', '∈', '∩', '∪', 'log', 'sin', 'cos', 'tan'];
@@ -15,8 +15,8 @@
   // ---------- ルーティング ----------
 
   function route() {
-    const m = /^#\/task\/(\d+)/.exec(location.hash);
-    if (m) openTask(Number(m[1]));
+    const m = /^#\/task\/([\w-]+)/.exec(location.hash);
+    if (m) openTask(m[1]);
     else showList();
   }
 
@@ -34,42 +34,66 @@
 
   // ---------- 課題一覧 ----------
 
-  async function showList() {
-    current = null;
-    const tasks = await api('GET', '/api/student/tasks');
-    const groupLine = me.group
-      ? h('p', { class: 'muted small' }, `グループ：${me.group.name}（${me.group.members.join('、')}）`)
+  function showList() {
+    closeTask();
+    const { state } = store;
+    const tasks = store.sortedTasks();
+    const statusOf = (t) => {
+      const s = store.submissionView(t, store.mySub(t));
+      return s ? s.status : 'none';
+    };
+    const groupLine = state.group
+      ? h('p', { class: 'muted small' }, `グループ：${state.group.name}${state.group.members && state.group.members.length ? `（${state.group.members.join('、')}）` : ''}`)
       : null;
-    const items = tasks.map((t) => h('button', {
-      class: 'card task-item',
-      onclick: () => { location.hash = `#/task/${t.id}`; },
-    },
-    h('div', { class: 't' },
-      h('strong', {}, t.title),
-      h('div', { class: 'row', style: { marginTop: '4px' } },
-        t.mode === 'group' ? h('span', { class: 'badge group' }, 'グループ') : h('span', { class: 'badge' }, '個人'),
-        t.status === 'closed' ? h('span', { class: 'badge closed' }, '締切') : null,
-        t.hasFeedback ? h('span', { class: 'badge submitted' }, 'コメントあり') : null)),
-    statusBadge(t.myStatus || 'none')));
-    const cleared = tasks.filter((t) => t.myStatus === 'cleared').length;
-    MB.fill(view, 
+    const items = tasks.map((t) => {
+      const s = store.mySub(t);
+      return h('button', { class: 'card task-item', onclick: () => { location.hash = `#/task/${t.id}`; } },
+        h('div', { class: 't' },
+          h('strong', {}, t.title),
+          h('div', { class: 'row', style: { marginTop: '4px' } },
+            t.mode === 'group' ? h('span', { class: 'badge group' }, 'グループ') : h('span', { class: 'badge' }, '個人'),
+            t.status === 'closed' ? h('span', { class: 'badge closed' }, '締切') : null,
+            s && s.feedback ? h('span', { class: 'badge submitted' }, 'コメントあり') : null)),
+        statusBadge(statusOf(t)));
+    });
+    const cleared = tasks.filter((t) => statusOf(t) === 'cleared').length;
+    fill(view,
       h('div', { class: 'row between', style: { marginBottom: '8px' } },
         h('h1', { style: { margin: 0 } }, '課題'),
         tasks.length ? h('span', { class: 'muted small' }, `クリア ${cleared} / ${tasks.length}`) : null),
       groupLine,
-      tasks.length ? h('div', {}, items) : h('div', { class: 'card muted' }, 'まだ課題はありません。先生が課題を出すと、ここに表示されます。'),
-    );
+      tasks.length ? h('div', {}, items) : h('div', { class: 'card muted' }, 'まだ課題はありません。先生が課題を出すと、ここに表示されます。'));
   }
 
   // ---------- 課題の画面 ----------
 
-  async function openTask(taskId) {
-    const data = await api('GET', `/api/student/tasks/${taskId}`).catch((err) => {
-      toast(err.message);
+  // 画面に必要なものを、store の最新の状態から組み立てる
+  function taskData(taskId) {
+    const t = store.state.tasks.get(taskId);
+    if (!t) return null;
+    const s = store.mySub(t);
+    return {
+      task: t,
+      submission: store.submissionView(t, s),
+      needsGroup: t.mode === 'group' && !store.ownerKey(t),
+      help: store.state.help.get(taskId) || null,
+      canSeePeers: store.canSeePeers(t),
+    };
+  }
+
+  function closeTask() {
+    if (current && current.offPeers) current.offPeers();
+    current = null;
+  }
+
+  function openTask(taskId) {
+    closeTask();
+    const data = taskData(taskId);
+    if (!data) {
+      toast('課題が見つかりません');
       location.hash = '';
-      return null;
-    });
-    if (!data) return;
+      return;
+    }
     const s = data.submission;
     current = {
       taskId,
@@ -84,16 +108,17 @@
         confidence: s ? s.confidence : null,
       },
       els: {},
+      peers: null,
     };
     // 下書きがあり、提出内容と違えば下書きを優先する
     const dText = loadDraft(taskId, 'text');
     if (s && dText && dText !== s.text) { current.form.text = dText; current.dirty = true; }
     renderTask();
-    loadPeers();
+    watchPeers();
   }
 
   function draftKey(taskId, field) {
-    return `mb-draft:${me.id}:${taskId}:${field}`;
+    return `mb-draft:${store.state.sid}:${taskId}:${field}`;
   }
   function loadDraft(taskId, field) {
     try { return localStorage.getItem(draftKey(taskId, field)) || ''; } catch { return ''; }
@@ -117,7 +142,7 @@
         t.status === 'closed' ? h('span', { class: 'badge closed' }, '締め切り') : null),
       h('h1', {}, t.title),
       rich(t.body),
-      t.image ? h('img', { class: 'task-image', src: fileUrl(t.image), alt: '問題の図' }) : null,
+      t.imageV ? img({ path: `tasks/${t.id}/files/image`, v: t.imageV }, { class: 'task-image', alt: '問題の図' }) : null,
       t.hint ? h('div', { class: 'hint' }, h('strong', {}, 'ヒント'), rich(t.hint)) : null);
 
     current.els.status = h('div');
@@ -125,40 +150,42 @@
     current.els.peers = h('div');
     current.els.help = h('div');
 
-    MB.fill(view, 
+    fill(view,
       h('button', { class: 'small', style: { marginBottom: '12px' }, onclick: () => { location.hash = ''; } }, '← 課題一覧'),
       header,
       current.els.status,
       current.els.form,
       current.els.help,
-      current.els.peers,
-    );
+      current.els.peers);
     renderStatus();
     renderForm();
     renderHelp();
+    renderPeers();
   }
 
   function renderStatus() {
     const { data } = current;
     const s = data.submission;
     const el = current.els.status;
-    MB.fill(el);
+    fill(el);
     if (data.needsGroup) {
       el.append(h('div', { class: 'card' }, h('div', { class: 'result-box retry' }, 'グループが決まっていません。先生に伝えてください。')));
       return;
     }
     if (!s) return;
-    let box;
-    if (s.status === 'cleared') box = h('div', { class: 'result-box cleared' }, '✓ クリア！');
-    else if (s.status === 'retry') box = h('div', { class: 'result-box retry' }, 'もう一度考えて、再提出してください');
-    else if (s.autoCorrect === 0) box = h('div', { class: 'result-box wrong' }, '不正解… もう一度考えてみよう');
-    else box = h('div', { class: 'result-box submitted' }, '提出しました');
+    const box = {
+      cleared: () => h('div', { class: 'result-box cleared' }, '✓ クリア！'),
+      retry: () => h('div', { class: 'result-box retry' }, 'もう一度考えて、再提出してください'),
+      wrong: () => h('div', { class: 'result-box wrong' }, '不正解… もう一度考えてみよう'),
+      pending: () => h('div', { class: 'result-box pending' }, '提出しました。判定を待っています…'),
+      submitted: () => h('div', { class: 'result-box submitted' }, '提出しました'),
+    }[s.status]();
     el.append(h('div', { class: 'card stack' },
       box,
       s.feedback ? h('div', { class: 'feedback' }, h('strong', {}, '先生から'), rich(s.feedback)) : null,
       h('div', { class: 'muted small' },
         `提出 ${s.attempts} 回目・${MB.timeAgo(s.updatedAt)}`,
-        data.task.mode === 'group' && s.lastEditor ? `（最後に提出：${s.lastEditor}）` : '')));
+        data.task.mode === 'group' && s.lastEditorName ? `（最後に提出：${s.lastEditorName}）` : '')));
   }
 
   // 記号ボタン。open=false のときは「記号」ボタンを押すと開く
@@ -192,11 +219,10 @@
     const t = data.task;
     const s = data.submission;
     const el = current.els.form;
-    MB.fill(el);
+    fill(el);
     if (data.needsGroup) return;
-    const closed = t.status !== 'open';
 
-    if (closed) {
+    if (t.status !== 'open') {
       if (s) el.append(h('div', { class: 'card stack' }, h('h2', {}, t.mode === 'group' ? 'グループの回答' : '自分の回答'), answerView(s)));
       else el.append(h('div', { class: 'card muted' }, 'この課題は締め切られました。'));
       return;
@@ -216,7 +242,7 @@
       parts.push(h('div', { class: 'field' },
         h('label', {}, '答え'),
         input,
-        symbolBar(input, () => { form.shortAnswer = input.value; markDirty(); })));
+        symbolBar(input, () => { form.shortAnswer = input.value; saveDraft('short', input.value); markDirty(); })));
     }
 
     if (t.allowText) {
@@ -224,7 +250,7 @@
       const updatePreview = debounce(() => {
         const has = /\$|\\\(|\\\[/.test(form.text);
         preview.classList.toggle('hidden', !has);
-        if (has) MB.fill(preview, rich(form.text));
+        if (has) fill(preview, rich(form.text));
       }, 300);
       const ta = h('textarea', {
         placeholder: t.answerKind === 'short' ? '考え方（任意）' : '考えや理由を書こう',
@@ -242,15 +268,17 @@
 
     if (t.allowDraw) {
       const thumbBox = h('div');
-      const currentDrawing = () => (form.drawing === 'keep' ? fileUrl(s && s.drawing) : form.drawing || null);
+      const currentDrawing = () => (form.drawing === 'keep' ? s && s.drawing : form.drawing || null);
       const paint = () => {
         const src = currentDrawing();
-        MB.fill(thumbBox, src
-          ? h('img', { class: 'draw-thumb', src, alt: '手書きの回答', onclick: openPad })
+        fill(thumbBox, src
+          ? img(src, { class: 'draw-thumb', alt: '手書きの回答', onclick: openPad })
           : h('button', { type: 'button', class: 'draw-empty', onclick: openPad }, 'タップして手書きで書く'));
       };
       async function openPad() {
-        const result = await MB.openDrawPad({ initial: currentDrawing() });
+        const src = currentDrawing();
+        const initial = src && typeof src === 'object' ? await window.Store.loadImage(src) : src;
+        const result = await MB.openDrawPad({ initial });
         if (result === null) return;
         form.drawing = result;
         markDirty();
@@ -285,8 +313,8 @@
         },
       });
       const paint = () => {
-        const src = form.photo === 'keep' ? fileUrl(s && s.photo) : form.photo || null;
-        MB.fill(box, ...(src ? [h('img', { class: 'answer-image', src, alt: '提出する写真', style: { maxHeight: '240px' } })] : []));
+        const src = form.photo === 'keep' ? s && s.photo : form.photo || null;
+        fill(box, src ? img(src, { class: 'answer-image', alt: '提出する写真', style: { maxHeight: '240px' } }) : null);
       };
       paint();
       parts.push(h('div', { class: 'field' },
@@ -315,33 +343,25 @@
     async function submit() {
       error.textContent = '';
       submitBtn.disabled = true;
+      submitBtn.textContent = '送信中…';
       try {
-        const r = await api('POST', `/api/student/tasks/${current.taskId}/submit`, {
-          shortAnswer: form.shortAnswer,
-          text: form.text,
-          drawing: form.drawing,
-          photo: form.photo,
-          confidence: form.confidence,
-          baseVersion: current.baseVersion,
-        });
+        const sub = await store.submit(current.taskId, form, current.baseVersion);
         clearDrafts(current.taskId);
         current.dirty = false;
-        current.data.submission = r.submission;
-        current.baseVersion = r.submission.version;
+        current.data.submission = sub;
+        current.baseVersion = sub.version;
         form.drawing = 'keep';
         form.photo = 'keep';
-        const sub = r.submission;
-        toast(sub.status === 'cleared' ? 'クリア！' : sub.autoCorrect === 0 ? '不正解… もう一度！' : '提出しました');
+        toast('提出しました');
         renderStatus();
         renderForm();
         renderHelp();
-        loadPeers();
         window.scrollTo({ top: 0, behavior: 'smooth' });
       } catch (err) {
         error.textContent = err.message;
         if (err.status === 409) current.els.notice = showReloadNotice();
-      } finally {
         submitBtn.disabled = false;
+        submitBtn.textContent = s ? '書き直して再提出' : '提出する';
       }
     }
 
@@ -358,7 +378,7 @@
       h('p', { style: { marginTop: 0 } }, 'グループの人が回答を更新しました。'),
       h('button', {
         class: 'small primary',
-        onclick: () => { current.dirty = false; openTask(current.taskId); },
+        onclick: () => { current.dirty = false; clearDrafts(current.taskId); openTask(current.taskId); },
       }, '最新の回答を読み込む'));
     current.els.form.prepend(box);
     return box;
@@ -366,58 +386,66 @@
 
   function answerView(s) {
     return h('div', { class: 'stack' },
-      s.shortAnswer ? h('div', { class: 'short', style: { fontSize: '1.2rem', fontWeight: 700 } }, s.shortAnswer) : null,
+      s.shortAnswer ? h('div', { style: { fontSize: '1.2rem', fontWeight: 700 } }, s.shortAnswer) : null,
       s.text ? rich(s.text) : null,
-      s.drawing ? h('img', { class: 'answer-image', src: fileUrl(s.drawing), alt: '手書き' }) : null,
-      s.photo ? h('img', { class: 'answer-image', src: fileUrl(s.photo), alt: '写真' }) : null);
+      s.drawing ? img(s.drawing, { class: 'answer-image', alt: '手書き' }) : null,
+      s.photo ? img(s.photo, { class: 'answer-image', alt: '写真' }) : null);
   }
 
   function renderHelp() {
     const { data } = current;
     const el = current.els.help;
-    MB.fill(el);
+    fill(el);
     if (data.task.status !== 'open' || (data.submission && data.submission.status === 'cleared')) return;
     if (data.help) {
       el.append(h('div', { class: 'card row between' },
         h('span', {}, '🙋 先生に助けを求めています', data.help.message ? `：「${data.help.message}」` : ''),
-        h('button', { class: 'small', onclick: async () => {
-          await api('DELETE', `/api/student/tasks/${current.taskId}/help`);
-          data.help = null;
-          renderHelp();
-        } }, '取り消す')));
+        h('button', { class: 'small', onclick: () => store.clearHelp(current.taskId).catch((e) => toast(e.message)) }, '取り消す')));
     } else {
       el.append(h('div', { style: { margin: '12px 0' } }, h('button', {
         class: 'block',
         onclick: async () => {
-          const message = window.prompt('どこがわからない？（空のままでもOK）', '');
-          if (message === null) return;
-          await api('POST', `/api/student/tasks/${current.taskId}/help`, { message });
-          data.help = { message };
-          toast('先生に伝えました');
-          renderHelp();
+          const msg = window.prompt('どこがわからない？（空のままでもOK）', '');
+          if (msg === null) return;
+          try {
+            await store.setHelp(current.taskId, msg);
+            toast('先生に伝えました');
+          } catch (e) {
+            toast(e.message);
+          }
         },
       }, '🙋 わからない・先生を呼ぶ')));
     }
   }
 
-  async function loadPeers() {
-    if (!current) return;
+  // みんなの考え：見てよい間だけ受け取る
+  function watchPeers() {
+    const allowed = current.data.canSeePeers;
+    if (allowed && !current.offPeers) {
+      current.offPeers = store.watchPeers(current.taskId, (list) => {
+        if (!current) return;
+        current.peers = list;
+        renderPeers();
+      });
+    } else if (!allowed && current.offPeers) {
+      current.offPeers();
+      current.offPeers = null;
+      current.peers = null;
+    }
+    renderPeers();
+  }
+
+  function renderPeers() {
     const el = current.els.peers;
     const t = current.data.task;
-    if (!current.data.canSeePeers) {
-      MB.fill(el, t.peerView === 'after_submit'
+    if (!current.data.canSeePeers || !current.peers) {
+      fill(el, t.peerView === 'after_submit' && !current.data.submission
         ? h('p', { class: 'muted small', style: { textAlign: 'center' } }, '提出すると、みんなの考え（匿名）を見られます')
-        : '');
+        : null);
       return;
     }
-    let peers;
-    try {
-      peers = await api('GET', `/api/student/tasks/${current.taskId}/peers`);
-    } catch {
-      MB.fill(el);
-      return;
-    }
-    MB.fill(el, h('div', { class: 'card' },
+    const peers = current.peers;
+    fill(el, h('div', { class: 'card' },
       h('h2', {}, `みんなの考え（${peers.length}件・匿名）`),
       peers.length ? null : h('p', { class: 'muted' }, 'まだありません'),
       peers.map((p) => h('div', { class: 'card', style: { boxShadow: 'none', background: p.mine ? 'var(--accent-soft)' : '' } },
@@ -428,10 +456,7 @@
             : h('button', {
               class: `small${p.liked ? ' primary' : ''}`,
               'aria-pressed': p.liked ? 'true' : 'false',
-              onclick: async () => {
-                await api('POST', `/api/student/submissions/${p.id}/like`);
-                loadPeers();
-              },
+              onclick: () => store.toggleLike(current.taskId, p.id, p.liked).catch((e) => toast(e.message)),
             }, `♥ 参考になった ${p.likes}`)),
         answerView(p)))));
   }
@@ -439,26 +464,29 @@
   // ---------- メニュー ----------
 
   $('#menu-btn').addEventListener('click', () => {
+    const me = store.state.me;
     const nameInput = h('input', { type: 'text', value: me.name, maxlength: 20 });
-    const cur = h('input', { type: 'password', autocomplete: 'current-password' });
-    const next = h('input', { type: 'password', autocomplete: 'new-password' });
+    const cur = h('input', { type: 'password', autocomplete: 'current-password', placeholder: '今のパスワード' });
+    const next = h('input', { type: 'password', autocomplete: 'new-password', placeholder: '新しいパスワード（6文字以上）' });
     const error = h('div', { class: 'error' });
     const m = modal(h('div', { class: 'stack' },
       h('h2', {}, 'メニュー'),
-      h('p', { class: 'muted small', style: { margin: 0 } }, `ログイン中：${me.name}${me.group ? `（${me.group.name}）` : ''}`),
-      h('div', { class: 'field' }, h('label', {}, '表示名を変える'), h('div', { class: 'row' }, h('div', { class: 'grow' }, nameInput),
-        h('button', { onclick: async () => {
-          try {
-            await api('POST', '/api/me/name', { name: nameInput.value });
-            me.name = nameInput.value.trim();
-            toast('名前を変えました（次からこの名前でログイン）');
-          } catch (e) { error.textContent = e.message; }
-        } }, '変更'))),
+      h('p', { class: 'muted small', style: { margin: 0 } }, `ログイン中：${me.name}${store.state.group ? `（${store.state.group.name}）` : ''}`),
+      h('div', { class: 'field' }, h('label', {}, '表示名を変える', h('div', { class: 'help' }, '次からはこの名前でログインします')),
+        h('div', { class: 'row' }, h('div', { class: 'grow' }, nameInput),
+          h('button', { onclick: async () => {
+            error.textContent = '';
+            try {
+              await store.changeName(nameInput.value);
+              toast('名前を変えました');
+            } catch (e) { error.textContent = e.message; }
+          } }, '変更'))),
       h('div', { class: 'field' }, h('label', {}, 'パスワードを変える'),
         h('div', { class: 'stack' }, cur, next),
         h('button', { style: { marginTop: '8px' }, onclick: async () => {
+          error.textContent = '';
           try {
-            await api('POST', '/api/me/password', { current: cur.value, next: next.value });
+            await window.Store.changePassword(cur.value, next.value);
             toast('パスワードを変えました');
             cur.value = '';
             next.value = '';
@@ -468,35 +496,31 @@
       h('div', { class: 'row between' },
         h('button', { class: 'danger', onclick: MB.logout }, 'ログアウト'),
         h('button', { onclick: () => m.close() }, '閉じる'))));
-    cur.placeholder = '今のパスワード';
-    next.placeholder = '新しいパスワード（4文字以上）';
   });
 
   // ---------- リアルタイム更新 ----------
 
-  // 通知は短い間にまとめて届くので、溜めてから1回だけ取り直す
-  const pending = { taskIds: new Set(), any: false };
-
-  const refresh = debounce(async () => {
-    const touched = new Set(pending.taskIds);
-    const any = pending.any;
-    pending.taskIds.clear();
-    pending.any = false;
-    if (!current) return showList();
-    const id = current.taskId;
-    if (!any && !touched.has(id)) return;
-    let data;
-    try {
-      data = await api('GET', `/api/student/tasks/${id}`);
-    } catch {
+  function onChange(types) {
+    if (types.has('denied') && !store.state.me) {
+      MB.logout();
+      return;
+    }
+    $('#class-name').textContent = store.state.className;
+    if (!current) {
+      if (!/^#\/task\//.test(location.hash)) showList();
+      return;
+    }
+    const data = taskData(current.taskId);
+    if (!data) {
+      current.dirty = false;
       location.hash = '';
       return;
     }
-    if (!current || current.taskId !== id) return;
     const prev = current.data;
     current.data = data;
     const taskChanged = JSON.stringify(prev.task) !== JSON.stringify(data.task) || prev.needsGroup !== data.needsGroup;
-    const newVersion = data.submission && (!prev.submission || data.submission.version !== prev.submission.version);
+    const prevV = prev.submission ? prev.submission.version : 0;
+    const newVersion = data.submission && data.submission.version !== prevV && data.submission.version !== current.baseVersion;
     // 入力中の内容は current.form に残っているので、描き直しても消えない
     let formChanged = false;
     if (newVersion && !current.dirty) {
@@ -517,32 +541,31 @@
     if (newVersion && current.dirty && (!current.els.notice || !current.els.notice.isConnected)) {
       current.els.notice = showReloadNotice();
     }
-    loadPeers();
-  }, 400);
-
-  function onChange(e) {
-    if (e.taskId) pending.taskIds.add(e.taskId);
-    else pending.any = true;
-    refresh();
+    watchPeers();
   }
 
   (async () => {
-    try {
-      me = await api('GET', '/api/me');
-    } catch {
-      location.href = '/';
+    const who = await window.Store.whoami();
+    if (who.role !== 'student') {
+      location.href = who.role === 'teacher' ? '/teacher' : '/';
       return;
     }
-    if (me.role !== 'student') {
-      location.href = '/teacher';
-      return;
-    }
-    $('#class-name').textContent = me.className;
-    document.title = `${me.className} - 数学ボード`;
-    listen(async (e) => {
-      if (e.type === 'students' || e.type === 'resume') me = await api('GET', '/api/me');
-      onChange(e);
-    }, (on) => $('#live').classList.toggle('on', on));
-    route();
+    store = window.Store.studentStore(who);
+    fill(view, h('p', { class: 'muted' }, '読み込み中…'));
+    let started = false;
+    store.on((types) => {
+      if (!store.state.ready) return;
+      document.title = `${store.state.className} - 数学ボード`;
+      $('#live').classList.add('on');
+      if (!started) {
+        started = true;
+        $('#class-name').textContent = store.state.className;
+        route();
+        return;
+      }
+      onChange(types);
+    });
+    window.addEventListener('offline', () => $('#live').classList.remove('on'));
+    window.addEventListener('online', () => $('#live').classList.add('on'));
   })();
 })();

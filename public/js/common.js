@@ -1,23 +1,5 @@
 // 全画面で共通の小さなヘルパー
 (function () {
-  async function api(method, url, body) {
-    const res = await fetch(url, {
-      method,
-      headers: body !== undefined ? { 'Content-Type': 'application/json' } : {},
-      body: body !== undefined ? JSON.stringify(body) : undefined,
-      credentials: 'same-origin',
-    });
-    let data = null;
-    const type = res.headers.get('content-type') || '';
-    if (type.includes('json')) data = await res.json();
-    if (!res.ok) {
-      const err = new Error((data && data.error) || `エラーが起きました (${res.status})`);
-      err.status = res.status;
-      throw err;
-    }
-    return data;
-  }
-
   // h('div', {class: 'x', onclick: fn}, child1, 'text', ...)
   function h(tag, attrs, ...children) {
     const el = document.createElement(tag);
@@ -91,7 +73,21 @@
     return el;
   }
 
-  const fileUrl = (name) => (name ? `/files/${name}` : null);
+  // Firestore に入っている画像を読み込んで表示する。ref = { path, v }
+  function img(ref, attrs = {}) {
+    const el = h('img', { alt: '', ...attrs });
+    if (!ref) return el;
+    if (typeof ref === 'string') {
+      el.src = ref;
+      return el;
+    }
+    el.classList.add('loading');
+    window.Store.loadImage(ref).then((data) => {
+      el.classList.remove('loading');
+      if (data) el.src = data;
+    });
+    return el;
+  }
 
   function modal(content, { wide = false, onClose } = {}) {
     const box = h('div', { class: `modal${wide ? ' wide' : ''}`, role: 'dialog', 'aria-modal': 'true' }, content);
@@ -108,12 +104,8 @@
     return { close, box };
   }
 
-  function confirmBox(message) {
-    return Promise.resolve(window.confirm(message));
-  }
-
   // 写真を縮小して JPEG の data URL にする（スマホの写真は大きいので）
-  function compressImage(file, maxSide = 1600, quality = 0.82) {
+  function compressImage(file, maxSide = 1400, quality = 0.75) {
     return new Promise((resolve, reject) => {
       const url = URL.createObjectURL(file);
       const img = new Image();
@@ -137,25 +129,6 @@
     });
   }
 
-  // サーバーからの変更通知を受け取る。切れても自動で再接続する
-  function listen(onChange, onState) {
-    let es;
-    function connect() {
-      es = new EventSource('/api/events');
-      es.addEventListener('open', () => onState && onState(true));
-      es.addEventListener('error', () => onState && onState(false));
-      es.addEventListener('change', (e) => {
-        try { onChange(JSON.parse(e.data)); } catch (err) { console.error(err); }
-      });
-    }
-    connect();
-    // スマホでスリープから戻ったときに取り直す
-    document.addEventListener('visibilitychange', () => {
-      if (document.visibilityState === 'visible') onChange({ type: 'resume' });
-    });
-    return () => es.close();
-  }
-
   // 同じ処理が短時間に何度も呼ばれたら1回にまとめる
   function debounce(fn, ms = 250) {
     let t;
@@ -165,15 +138,15 @@
     };
   }
 
-  const STATUS_LABEL = { none: '未提出', submitted: '提出済', cleared: 'クリア', retry: '再提出', wrong: '不正解' };
+  const STATUS_LABEL = { none: '未提出', pending: '判定待ち', submitted: '提出済', cleared: 'クリア', retry: '再提出', wrong: '不正解' };
 
-  function statusBadge(status, autoCorrect) {
-    const key = status === 'submitted' && autoCorrect === 0 ? 'wrong' : (status || 'none');
+  function statusBadge(status) {
+    const key = status || 'none';
     return h('span', { class: `badge ${key}` }, key === 'cleared' ? '✓ クリア' : STATUS_LABEL[key]);
   }
 
   async function logout() {
-    await api('POST', '/api/logout');
+    await window.Store.logout();
     location.href = '/';
   }
 
@@ -185,5 +158,5 @@
     return new Date(ms).toLocaleDateString('ja-JP');
   }
 
-  window.MB = { api, h, append, fill, $, toast, rich, fileUrl, modal, confirmBox, compressImage, listen, debounce, statusBadge, STATUS_LABEL, logout, timeAgo };
+  window.MB = { h, append, fill, $, toast, rich, img, modal, compressImage, debounce, statusBadge, STATUS_LABEL, logout, timeAgo };
 })();

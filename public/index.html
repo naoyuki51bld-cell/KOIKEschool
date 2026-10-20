@@ -13,9 +13,13 @@
     <p class="muted" style="text-align:center" id="class-name"></p>
     <div id="view"></div>
   </main>
+  <script src="/vendor/firebase.js"></script>
+  <script src="/firebase-config.js"></script>
+  <script src="/js/store.js"></script>
   <script src="/js/common.js"></script>
   <script>
-    const { api, h, $ } = MB;
+    const { h, $, toast } = MB;
+    const S = window.Store;
     const view = $('#view');
     const params = new URLSearchParams(location.search);
 
@@ -54,17 +58,17 @@
 
     function setupView() {
       MB.fill(view, 
-        h('p', {}, '最初に教師用アカウントを作成します。'),
+        h('p', {}, '最初に先生のアカウントを作成します。'),
         form(async (fd) => {
-          await api('POST', '/api/setup', {
+          await S.setup({
             className: fd.get('className'),
-            name: fd.get('name'),
+            email: fd.get('email'),
             password: fd.get('password'),
           });
           go('teacher');
         },
         field('クラス名', input('className', 'text', { placeholder: '例：2年3組 数学Ⅱ' })),
-        field('教師の名前（ログイン名）', input('name', 'text', { autocomplete: 'username' })),
+        field('先生のメールアドレス（ログインに使います）', input('email', 'email', { autocomplete: 'username' }), 'パスワードを忘れたときは、ここに再設定のメールが届きます'),
         field('パスワード', input('password', 'password', { autocomplete: 'new-password', minlength: 8 }), '8文字以上'),
         h('button', { type: 'submit', class: 'primary block' }, '作成してはじめる')),
       );
@@ -72,16 +76,30 @@
 
     function authView(status, tab) {
       const loginForm = form(async (fd) => {
-        const r = await api('POST', '/api/login', { name: fd.get('name'), password: fd.get('password') });
-        go(r.role);
+        await S.login(fd.get('name'), fd.get('password'));
+        const who = await S.whoami();
+        if (!who.role) throw new Error('このアカウントは使えません。先生にパスワードの再設定を頼んでください');
+        go(who.role);
       },
-      field('名前', input('name', 'text', { autocomplete: 'username' })),
+      field('名前', input('name', 'text', { autocomplete: 'username' }), '先生はメールアドレス'),
       field('パスワード', input('password', 'password', { autocomplete: 'current-password' })),
-      h('button', { type: 'submit', class: 'primary block' }, 'ログイン'));
+      h('button', { type: 'submit', class: 'primary block' }, 'ログイン'),
+      h('p', { class: 'small muted', style: { marginBottom: 0 } }, 'パスワードを忘れたら：生徒は先生に再設定してもらいます。先生は',
+        h('a', { href: '#', onclick: async (e) => {
+          e.preventDefault();
+          const email = window.prompt('先生のメールアドレス');
+          if (!email) return;
+          try {
+            await S.resetTeacherPassword(email);
+            toast('再設定のメールを送りました');
+          } catch (err) {
+            toast(err.message);
+          }
+        } }, 'こちら'), '。'));
 
       const registerForm = form(async (fd) => {
         if (fd.get('password') !== fd.get('password2')) throw new Error('確認用のパスワードが一致しません');
-        await api('POST', '/api/register', {
+        await S.register({
           joinCode: fd.get('joinCode'),
           name: fd.get('name'),
           number: fd.get('number') || null,
@@ -92,7 +110,7 @@
       field('参加コード', input('joinCode', 'text', { value: params.get('join') || '', autocapitalize: 'characters', placeholder: '先生が見せている6文字' })),
       field('表示名（あだ名）', input('name', 'text', { autocomplete: 'username', maxlength: 20 }), '本名ではなく、自分で決めた名前にしてください。ログインに使います'),
       field('出席番号', h('input', { name: 'number', type: 'number', inputmode: 'numeric', min: 1, max: 999 }), '先生だけが見ます（任意）'),
-      field('パスワード', input('password', 'password', { autocomplete: 'new-password', minlength: 4 }), '4文字以上。忘れたら先生に再設定してもらえます'),
+      field('パスワード', input('password', 'password', { autocomplete: 'new-password', minlength: 6 }), '6文字以上。忘れたら先生に再設定してもらえます'),
       field('パスワード（確認）', input('password2', 'password', { autocomplete: 'new-password' })),
       h('button', { type: 'submit', class: 'primary block' }, '登録してはじめる'));
 
@@ -102,7 +120,7 @@
         registerForm.classList.toggle('hidden', which !== 'register');
         [...tabs.children].forEach((b) => b.classList.toggle('on', b.dataset.tab === which));
       };
-      tabs.append(
+      MB.fill(tabs,
         h('button', { 'data-tab': 'login', style: { flex: 1 }, onclick: () => show('login') }, 'ログイン'),
         status.registrationOpen ? h('button', { 'data-tab': 'register', style: { flex: 1 }, onclick: () => show('register') }, 'はじめての人') : null,
       );
@@ -111,13 +129,17 @@
     }
 
     (async () => {
-      const status = await api('GET', '/api/status');
+      let status;
+      try {
+        status = await S.publicConfig();
+      } catch (err) {
+        MB.fill(view, h('div', { class: 'card error' }, `接続できません：${err.message}`));
+        return;
+      }
       $('#class-name').textContent = status.className;
       if (status.needsSetup) return setupView();
-      try {
-        const me = await api('GET', '/api/me');
-        return go(me.role);
-      } catch { /* 未ログイン */ }
+      const who = await S.whoami();
+      if (who.role) return go(who.role);
       authView(status, params.get('join') ? 'register' : 'login');
     })();
   </script>
