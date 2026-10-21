@@ -1,0 +1,37 @@
+# main に変更が入るたびに Firebase（Hosting とアクセス規則）へ公開する。
+# 「Actions」タブの「Run workflow」からも手動で動かせる。
+name: Firebase に公開
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 秘密鍵が登録されているか確認
+        env:
+          FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+        run: |
+          if [ -z "$FIREBASE_SERVICE_ACCOUNT" ]; then
+            echo "::error::リポジトリの Secrets に FIREBASE_SERVICE_ACCOUNT が登録されていません"
+            exit 1
+          fi
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - run: node --no-warnings --test test/judge.test.js
+      - name: 公開
+        env:
+          FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+        run: |
+          printf '%s' "$FIREBASE_SERVICE_ACCOUNT" > "$RUNNER_TEMP/sa.json"
+          export GOOGLE_APPLICATION_CREDENTIALS="$RUNNER_TEMP/sa.json"
+          npx firebase deploy --only hosting,firestore --project koikeschool-3564e --non-interactive
+          rm -f "$RUNNER_TEMP/sa.json"
