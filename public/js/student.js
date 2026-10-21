@@ -58,11 +58,29 @@
     });
     const cleared = tasks.filter((t) => statusOf(t) === 'cleared').length;
     fill(view,
+      installBanner(),
       h('div', { class: 'row between', style: { marginBottom: '8px' } },
         h('h1', { style: { margin: 0 } }, '課題'),
         tasks.length ? h('span', { class: 'muted small' }, `クリア ${cleared} / ${tasks.length}`) : null),
       groupLine,
       tasks.length ? h('div', {}, items) : h('div', { class: 'card muted' }, 'まだ課題はありません。先生が課題を出すと、ここに表示されます。'));
+  }
+
+  // ホーム画面にまだ追加していない人への案内（「あとで」を押したら7日間は出さない）
+  function installBanner() {
+    if (MB.install.standalone()) return null;
+    try {
+      if (Date.now() - Number(localStorage.getItem('mb-install-later') || 0) < 7 * 864e5) return null;
+    } catch { /* 無視 */ }
+    const box = h('div', { class: 'card row', style: { marginBottom: '12px', background: 'var(--accent-soft)', borderColor: 'var(--accent)' } },
+      h('span', { class: 'grow', style: { minWidth: '180px' } }, '📲 ホーム画面に追加すると、アプリのようにすぐ開けます'),
+      h('div', { class: 'row', style: { flexWrap: 'nowrap' } },
+        h('button', { class: 'small primary', onclick: () => MB.install.prompt() }, '追加する'),
+        h('button', { class: 'small', onclick: () => {
+          try { localStorage.setItem('mb-install-later', String(Date.now())); } catch { /* 無視 */ }
+          box.remove();
+        } }, 'あとで')));
+    return box;
   }
 
   // ---------- 課題の画面 ----------
@@ -492,6 +510,7 @@
             next.value = '';
           } catch (e) { error.textContent = e.message; }
         } }, '変更')),
+      MB.install.standalone() ? null : h('button', { onclick: () => { m.close(); MB.install.prompt(); } }, '📲 ホーム画面に追加'),
       error,
       h('div', { class: 'row between' },
         h('button', { class: 'danger', onclick: MB.logout }, 'ログアウト'),

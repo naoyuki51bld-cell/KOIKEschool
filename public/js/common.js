@@ -173,5 +173,64 @@
     return new Date(ms).toLocaleDateString('ja-JP');
   }
 
-  window.MB = { h, append, fill, $, toast, rich, img, modal, compressImage, debounce, showErrors, statusBadge, STATUS_LABEL, logout, timeAgo };
+  // ---------- ホーム画面に追加 ----------
+
+  if ('serviceWorker' in navigator && location.protocol === 'https:') {
+    navigator.serviceWorker.register('/sw.js').catch((err) => console.warn('service worker', err));
+  }
+
+  let installEvent = null;
+  window.addEventListener('beforeinstallprompt', (e) => {
+    e.preventDefault();
+    installEvent = e;
+    document.dispatchEvent(new Event('mb-installable'));
+  });
+  window.addEventListener('appinstalled', () => {
+    installEvent = null;
+    toast('ホーム画面に追加しました');
+  });
+
+  const install = {
+    // すでにホーム画面から開いているか
+    standalone: () => window.matchMedia('(display-mode: standalone)').matches || navigator.standalone === true,
+    ios: () => /iPhone|iPad|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1),
+    // Android の Chrome などで、ボタン1つで追加できるとき
+    canPrompt: () => !!installEvent,
+    async prompt() {
+      if (!installEvent) return showHelp();
+      const e = installEvent;
+      installEvent = null;
+      e.prompt();
+      await e.userChoice.catch(() => null);
+      return undefined;
+    },
+  };
+
+  // 端末ごとの手順を出す
+  function showHelp() {
+    const step = (...c) => h('li', { style: { marginBottom: '6px' } }, ...c);
+    const ios = install.ios();
+    const inApp = /Line\/|FBAN|FBAV|Instagram/i.test(navigator.userAgent);
+    const m = modal(h('div', { class: 'stack' },
+      h('h2', {}, 'ホーム画面に追加する'),
+      inApp ? h('p', { class: 'error' }, 'LINE などのアプリの中で開いています。右上（または右下）のメニューから「ブラウザで開く」を選んでから、下の手順で追加してください。') : null,
+      ios
+        ? h('ol', {},
+          step('このページを ', h('strong', {}, 'Safari'), ' で開きます'),
+          step('画面下（iPadは右上）の ', h('strong', {}, '共有ボタン'), '（□から↑が出ているマーク）を押します'),
+          step('メニューを下にずらして ', h('strong', {}, '「ホーム画面に追加」'), ' を押します'),
+          step('右上の ', h('strong', {}, '「追加」'), ' を押すと、ホーム画面に「数学ボード」のアイコンができます'))
+        : h('ol', {},
+          step('このページを ', h('strong', {}, 'Chrome'), ' で開きます'),
+          step('右上の ', h('strong', {}, '︙（メニュー）'), ' を押します'),
+          step(h('strong', {}, '「ホーム画面に追加」'), ' または ', h('strong', {}, '「アプリをインストール」'), ' を押します'),
+          step('「追加」または「インストール」を押すと、アイコンができます')),
+      h('p', { class: 'muted small' }, ios
+        ? 'ホーム画面のアイコンから初めて開いたときは、もう一度ログインが必要です（Safari とは別に保存されるため）。'
+        : 'PC の Chrome / Edge では、アドレスバーの右にあるインストールのマークからも追加できます。'),
+      h('div', { class: 'row' }, h('span', { class: 'grow' }), h('button', { onclick: () => m.close() }, '閉じる'))));
+  }
+  install.showHelp = showHelp;
+
+  window.MB = { h, append, fill, $, toast, rich, img, modal, compressImage, debounce, showErrors, statusBadge, STATUS_LABEL, logout, timeAgo, install };
 })();

@@ -607,6 +607,11 @@
           cur.value = '';
           next.value = '';
         }) }, '変更')),
+      h('div', { class: 'field' }, h('label', {}, 'ホーム画面・デスクトップに追加',
+        h('div', { class: 'help' }, '先生の画面もアプリのように開けます。生徒のスマホには、課題一覧に追加の案内が出ます')),
+      MB.install.standalone()
+        ? h('p', { class: 'muted small' }, '追加済みのアプリで開いています')
+        : h('button', { onclick: () => MB.install.prompt() }, '📲 追加する')),
       h('button', { class: 'danger', onclick: MB.logout }, 'ログアウト')));
   }
 
