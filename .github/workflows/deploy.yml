@@ -33,5 +33,14 @@ jobs:
         run: |
           printf '%s' "$FIREBASE_SERVICE_ACCOUNT" > "$RUNNER_TEMP/sa.json"
           export GOOGLE_APPLICATION_CREDENTIALS="$RUNNER_TEMP/sa.json"
-          npx firebase deploy --only hosting,firestore --project koikeschool-3564e --non-interactive
+          set +e
+          npx firebase deploy --only hosting,firestore --project koikeschool-3564e --non-interactive 2>&1 | tee "$RUNNER_TEMP/deploy.log"
+          code=${PIPESTATUS[0]}
           rm -f "$RUNNER_TEMP/sa.json"
+          # 失敗したときは、原因が画面の「Annotations」に出るようにする
+          if [ "$code" -ne 0 ]; then
+            grep -iE "error|denied|permission|not enabled|has not been used|enable" "$RUNNER_TEMP/deploy.log" | head -15 | while IFS= read -r line; do
+              echo "::error::${line}"
+            done
+          fi
+          exit "$code"
