@@ -129,6 +129,21 @@
     });
   }
 
+  // 読み込めなかったデータがあるときに、画面の上に理由を出す
+  function showErrors(errors) {
+    let bar = $('#error-bar');
+    if (!bar) {
+      bar = h('div', { id: 'error-bar', class: 'container wide', role: 'alert' });
+      $('#view').before(bar);
+    }
+    const messages = [...new Set(errors.values())];
+    fill(bar, messages.length
+      ? h('div', { class: 'card', style: { borderColor: 'var(--bad)', color: 'var(--bad)' } },
+        h('strong', {}, '一部のデータを読み込めませんでした'),
+        messages.map((m) => h('div', { class: 'small' }, m)))
+      : null);
+  }
+
   // 同じ処理が短時間に何度も呼ばれたら1回にまとめる
   function debounce(fn, ms = 250) {
     let t;
@@ -158,5 +173,5 @@
     return new Date(ms).toLocaleDateString('ja-JP');
   }
 
-  window.MB = { h, append, fill, $, toast, rich, img, modal, compressImage, debounce, statusBadge, STATUS_LABEL, logout, timeAgo };
+  window.MB = { h, append, fill, $, toast, rich, img, modal, compressImage, debounce, showErrors, statusBadge, STATUS_LABEL, logout, timeAgo };
 })();

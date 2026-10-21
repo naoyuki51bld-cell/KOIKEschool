@@ -554,6 +554,7 @@
     fill(view, h('p', { class: 'muted' }, '読み込み中…'));
     let started = false;
     store.on((types) => {
+      MB.showErrors(store.state.errors);
       if (!store.state.ready) return;
       document.title = `${store.state.className} - 数学ボード`;
       $('#live').classList.add('on');

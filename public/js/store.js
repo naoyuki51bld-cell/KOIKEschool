@@ -76,6 +76,8 @@
       'auth/network-request-failed': '通信できません。ネットワークを確認してください',
       'auth/requires-recent-login': 'もう一度ログインしてからやり直してください',
       'permission-denied': 'この操作はできません（権限がありません）',
+      'failed-precondition': 'データベースの準備中です（公開直後は数分かかります）。自動でやり直します',
+      'resource-exhausted': '今日の無料枠を使い切りました。明日になると戻ります',
       unavailable: '通信できません。ネットワークを確認してください',
     };
     return map[code] || (err && err.message) || 'エラーが起きました';
@@ -239,6 +241,26 @@
     }
   }
 
+  // onSnapshot を張る。失敗したら知らせ、インデックスの準備中などのときは少し待って張り直す
+  function live(target, onNext, onFail) {
+    let off = null;
+    let timer = null;
+    let stopped = false;
+    const start = () => {
+      off = F.onSnapshot(target, onNext, (err) => {
+        console.error(err);
+        onFail(err);
+        if (!stopped && err.code !== 'permission-denied') timer = setTimeout(start, 20000);
+      });
+    };
+    start();
+    return () => {
+      stopped = true;
+      clearTimeout(timer);
+      if (off) off();
+    };
+  }
+
   // ---------- 変更通知 ----------
 
   function emitter() {
@@ -278,7 +300,7 @@
       tasks: new Map(),
       subs: new Map(), // taskId → 提出
       help: new Map(), // taskId → ヘルプ
-      online: true,
+      errors: new Map(), // 読み込めなかったもの → 理由
     };
     const offs = [];
     let groupOffs = [];
@@ -287,15 +309,20 @@
       loaded.add(name);
       if (!state.ready && ['me', 'tasks', 'subsU', 'help'].every((n) => loaded.has(n))) state.ready = true;
     };
-    const onError = (err) => {
-      console.error(err);
-      if (err.code === 'permission-denied') ev.emit('denied');
+    // 読み込みに失敗しても「読み込み中」のまま止まらないよう、理由を残して先へ進む
+    const failed = (name) => (err) => {
+      state.errors.set(name, message(err));
+      markLoaded(name);
+      ev.emit(err.code === 'permission-denied' ? 'denied' : 'error');
+    };
+    const ok = (name) => {
+      if (state.errors.delete(name)) ev.emit('error');
     };
 
-    offs.push(F.onSnapshot(ref('config/main'), (s) => {
+    offs.push(live(ref('config/main'), (s) => {
       state.className = s.exists() ? s.data().className : '';
       ev.emit('config');
-    }, onError));
+    }, failed('config')));
 
     function watchGroup(groupId) {
       groupOffs.forEach((f) => f());
@@ -303,13 +330,14 @@
       state.group = null;
       for (const [taskId, s] of state.subs) if (s.ownerType === 'group') state.subs.delete(taskId);
       if (!groupId) return;
-      groupOffs.push(F.onSnapshot(ref(`groups/${groupId}`), (s) => {
+      groupOffs.push(live(ref(`groups/${groupId}`), (s) => {
         state.group = s.exists() ? { id: s.id, ...s.data() } : null;
         ev.emit('group');
-      }, onError));
-      groupOffs.push(F.onSnapshot(F.query(F.collectionGroup(db, 'subs'), F.where('ownerKey', '==', `g_${groupId}`)), (snap) => {
+      }, failed('group')));
+      groupOffs.push(live(F.query(F.collectionGroup(db, 'subs'), F.where('ownerKey', '==', `g_${groupId}`)), (snap) => {
+        ok('subsG');
         applySubs(snap, 'group');
-      }, onError));
+      }, failed('subsG')));
     }
 
     function applySubs(snap, type) {
@@ -325,31 +353,35 @@
       return type;
     }
 
-    offs.push(F.onSnapshot(ref(`students/${who.sid}`), (s) => {
+    offs.push(live(ref(`students/${who.sid}`), (s) => {
       if (!s.exists()) return ev.emit('denied');
+      ok('me');
       const prevGroup = state.me && state.me.groupId;
       state.me = { id: s.id, ...s.data() };
       if (!loaded.has('me') || prevGroup !== state.me.groupId) watchGroup(state.me.groupId);
       markLoaded('me');
       ev.emit('me');
-    }, onError));
+    }, failed('me')));
 
-    offs.push(F.onSnapshot(F.query(col('tasks'), F.where('status', 'in', ['open', 'closed'])), (snap) => {
+    offs.push(live(F.query(col('tasks'), F.where('status', 'in', ['open', 'closed'])), (snap) => {
+      ok('tasks');
       snap.docChanges().forEach((c) => {
         if (c.type === 'removed') state.tasks.delete(c.doc.id);
         else state.tasks.set(c.doc.id, { id: c.doc.id, ...c.doc.data() });
       });
       markLoaded('tasks');
       ev.emit('tasks');
-    }, onError));
+    }, failed('tasks')));
 
-    offs.push(F.onSnapshot(F.query(F.collectionGroup(db, 'subs'), F.where('ownerKey', '==', `u_${who.sid}`)), (snap) => {
+    offs.push(live(F.query(F.collectionGroup(db, 'subs'), F.where('ownerKey', '==', `u_${who.sid}`)), (snap) => {
+      ok('subsU');
       applySubs(snap, 'user');
       markLoaded('subsU');
       ev.emit('subs');
-    }, onError));
+    }, failed('subsU')));
 
-    offs.push(F.onSnapshot(F.query(F.collectionGroup(db, 'help'), F.where('studentId', '==', who.sid)), (snap) => {
+    offs.push(live(F.query(F.collectionGroup(db, 'help'), F.where('studentId', '==', who.sid)), (snap) => {
+      ok('help');
       snap.docChanges().forEach((c) => {
         const taskId = c.doc.ref.parent.parent.id;
         if (c.type === 'removed') state.help.delete(taskId);
@@ -357,7 +389,7 @@
       });
       markLoaded('help');
       ev.emit('help');
-    }, onError));
+    }, failed('help')));
 
     const sortedTasks = () => [...state.tasks.values()].sort((a, b) => (a.sort - b.sort) || (a.createdAt - b.createdAt));
 
@@ -549,6 +581,7 @@
       subs: new Map(), // path → 提出
       help: new Map(), // `${taskId}:${studentId}` → ヘルプ
       likes: new Map(), // path → {pid, uid}
+      errors: new Map(), // 読み込めなかったもの → 理由
     };
     const offs = [];
     const loaded = new Set();
@@ -561,16 +594,20 @@
         syncGroupMembers();
       }
     };
-    const onError = (err) => {
-      console.error(err);
-      if (err.code === 'permission-denied') ev.emit('denied');
+    // 読み込みに失敗しても「読み込み中」のまま止まらないよう、理由を残して先へ進む
+    const failed = (name) => (err) => {
+      state.errors.set(name, message(err));
+      markLoaded(name);
+      ev.emit(err.code === 'permission-denied' ? 'denied' : 'error');
     };
-    const watchDoc = (path, name, fn) => offs.push(F.onSnapshot(ref(path), (s) => {
+    const watchDoc = (path, name, fn) => offs.push(live(ref(path), (s) => {
+      state.errors.delete(name);
       fn(s.exists() ? s.data() : null);
       markLoaded(name);
       ev.emit(name);
-    }, onError));
-    const watchCol = (q, name, map, keyOf, valueOf) => offs.push(F.onSnapshot(q, (snap) => {
+    }, failed(name)));
+    const watchCol = (q, name, map, keyOf, valueOf) => offs.push(live(q, (snap) => {
+      state.errors.delete(name);
       snap.docChanges().forEach((c) => {
         const k = keyOf(c.doc);
         if (c.type === 'removed') map.delete(k);
@@ -580,7 +617,7 @@
       ev.emit(name);
       if (name === 'subs') autoJudge();
       if (name === 'students' || name === 'groups') syncGroupMembers();
-    }, onError));
+    }, failed(name)));
 
     watchDoc('config/main', 'main', (d) => Object.assign(state.settings, { className: d?.className || '', registrationOpen: !!d?.registrationOpen }));
     watchDoc('config/secret', 'secret', (d) => { state.settings.joinCode = d?.joinCode || ''; });

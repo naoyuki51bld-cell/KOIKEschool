@@ -622,6 +622,7 @@
     store = window.Store.teacherStore(who);
     fill(view, h('p', { class: 'muted' }, '読み込み中…'));
     store.on(() => {
+      MB.showErrors(store.state.errors);
       if (!store.state.ready) return;
       $('#class-name').textContent = `${store.state.settings.className}（先生）`;
       $('#live').classList.add('on');
