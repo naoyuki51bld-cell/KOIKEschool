@@ -195,3 +195,11 @@ test('小テスト：生徒は公開されたテストの自分の得点だけ�
   await assertSucceeds(getDocs(collectionGroup(as('teacher'), 'scores')));
   await assertSucceeds(updateDoc(doc(as('teacher'), 'quizzes/q1/scores/s1'), { score: 9 }));
 });
+
+test('タイマー：全員が見られて、動かせるのは先生だけ', async () => {
+  const timer = { kind: 'timer', state: 'running', durationMs: 60000, accumulatedMs: 0, startedAt: 1, label: '' };
+  await assertSucceeds(setDoc(doc(as('teacher'), 'live/timer'), timer));
+  await assertSucceeds(getDoc(doc(as('uid1'), 'live/timer')));
+  await assertFails(setDoc(doc(as('uid1'), 'live/timer'), { ...timer, state: 'stopped' }));
+  await assertFails(getDoc(doc(env.unauthenticatedContext().firestore(), 'live/timer')));
+});

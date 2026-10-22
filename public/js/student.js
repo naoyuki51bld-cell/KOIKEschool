@@ -517,6 +517,28 @@
         answerView(p)))));
   }
 
+  // ---------- タイマー ----------
+
+  // 先生がタイマー・ストップウォッチを動かしている間、画面の上に出す
+  function startTimerBar() {
+    const text = h('span', { class: 't' });
+    const label = h('span', { class: 'small' });
+    const bar = h('div', { class: 'timer-bar hidden', role: 'timer', 'aria-live': 'off' }, '⏱', label, text);
+    $('.topbar').after(bar);
+    let wasDone = false;
+    MB.onTick(() => {
+      const info = MB.timerInfo(store.state.timer);
+      bar.classList.toggle('hidden', !info);
+      if (!info) { wasDone = false; return; }
+      text.textContent = info.done ? '時間です' : info.text;
+      label.textContent = info.paused ? `${info.label || ''}（一時停止）` : info.label || (info.kind === 'timer' ? '残り' : '経過');
+      bar.classList.toggle('paused', info.paused);
+      bar.classList.toggle('done', info.done);
+      if (info.done && !wasDone && navigator.vibrate) navigator.vibrate([200, 100, 200]);
+      wasDone = info.done;
+    });
+  }
+
   // ---------- メニュー ----------
 
   $('#menu-btn').addEventListener('click', () => {
@@ -609,11 +631,13 @@
       return;
     }
     store = window.Store.studentStore(who);
+    startTimerBar();
     fill(view, h('p', { class: 'muted' }, '読み込み中…'));
     let started = false;
     store.on((types) => {
       MB.showErrors(store.state.errors);
       if (!store.state.ready) return;
+      if (types.size === 1 && types.has('timer')) return;
       document.title = `${store.state.className} - 数学ボード`;
       $('#live').classList.add('on');
       if (!started) {

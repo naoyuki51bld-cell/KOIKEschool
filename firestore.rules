@@ -223,6 +223,13 @@ service cloud.firestore {
           : d.status == (wasCleared ? 'cleared' : 'submitted'));
     }
 
+    // ---------- タイマー（先生が動かし、全員が見る） ----------
+
+    match /live/{d} {
+      allow read: if signedIn();
+      allow write: if isTeacher();
+    }
+
     // ---------- 小テスト ----------
 
     // 生徒が見られるのは「生徒に公開」したテストと、その中の自分の得点だけ。

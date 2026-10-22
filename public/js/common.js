@@ -173,6 +173,28 @@
     return new Date(ms).toLocaleDateString('ja-JP');
   }
 
+  // ---------- タイマー・ストップウォッチ ----------
+
+  // 表示する内容。止まっているときは null
+  function timerInfo(t) {
+    if (!t || t.state === 'stopped') return null;
+    const elapsed = (t.accumulatedMs || 0) + (t.state === 'running' && t.startedAt ? Date.now() - t.startedAt : 0);
+    const fmt = (sec) => `${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, '0')}`;
+    if (t.kind === 'stopwatch') {
+      return { kind: 'stopwatch', text: fmt(Math.floor(elapsed / 1000)), paused: t.state === 'paused', done: false, label: t.label };
+    }
+    const remain = Math.max(0, Math.ceil((t.durationMs - elapsed) / 1000));
+    return { kind: 'timer', text: fmt(remain), paused: t.state === 'paused', done: remain === 0, label: t.label };
+  }
+
+  // 0.25秒ごとに呼ぶ（画面の数字を進めるため）
+  const tickers = new Set();
+  setInterval(() => tickers.forEach((fn) => fn()), 250);
+  function onTick(fn) {
+    tickers.add(fn);
+    return () => tickers.delete(fn);
+  }
+
   // ---------- ホーム画面に追加 ----------
 
   if ('serviceWorker' in navigator && location.protocol === 'https:') {
@@ -232,5 +254,5 @@
   }
   install.showHelp = showHelp;
 
-  window.MB = { h, append, fill, $, toast, rich, img, modal, compressImage, debounce, showErrors, statusBadge, STATUS_LABEL, logout, timeAgo, install };
+  window.MB = { h, append, fill, $, toast, rich, img, modal, compressImage, debounce, showErrors, statusBadge, STATUS_LABEL, logout, timeAgo, install, timerInfo, onTick };
 })();

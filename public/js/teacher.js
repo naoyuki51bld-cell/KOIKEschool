@@ -8,6 +8,7 @@
     tab: 'progress',
     answersTaskId: null,
     answersFilter: 'all',
+    taskOrder: (() => { try { return localStorage.getItem('mb-task-order') || 'new'; } catch { return 'new'; } })(),
     quizId: null, // 得点入力中の小テスト
     scoreDraft: {}, // 保存前の得点（生徒ID → 入力中の文字）
     answersSort: 'time',
@@ -201,30 +202,34 @@
   // ---------- 回答 ----------
 
   function renderAnswers() {
-    const usable = store.tasks().filter((t) => t.status !== 'draft');
+    // 新しい課題ほど上
+    const usable = store.tasks().filter((t) => t.status !== 'draft').reverse();
     if (!usable.length) {
       fill(view, h('div', { class: 'card muted' }, '公開した課題がまだありません。'));
       return;
     }
     if (!usable.find((t) => t.id === ui.answersTaskId)) {
       const open = usable.filter((t) => t.status === 'open');
-      ui.answersTaskId = (open[open.length - 1] || usable[usable.length - 1]).id;
+      ui.answersTaskId = (open[0] || usable[0]).id;
     }
     const t = store.taskView(store.state.tasks.get(ui.answersTaskId));
     const subs = store.submissionsOf(t.id);
     const present = store.state.present;
-    const selected = new Set(present.taskId === t.id ? present.submissionKeys : []);
+    const allMode = present.taskId === t.id && present.mode === 'all';
+    const selected = new Set(present.taskId === t.id && !allMode ? present.submissionKeys : []);
     const toggleSelect = run(async (path) => {
-      const keys = present.taskId === t.id ? [...present.submissionKeys] : [];
+      // 全員の回答を出しているときに選んだら、その1件から選び直す
+      const keys = present.taskId === t.id && !allMode ? [...present.submissionKeys] : [];
       const i = keys.indexOf(path);
       if (i >= 0) keys.splice(i, 1);
       else {
-        if (keys.length >= 8) return toast('提示できるのは8件までです');
+        if (keys.length >= 24) return toast('選んで提示できるのは24件までです。全員分は「全員の回答」で提示できます');
         keys.push(path);
       }
-      await store.setPresent({ taskId: t.id, submissionKeys: keys });
+      await store.setPresent({ taskId: t.id, submissionKeys: keys, mode: 'selected' });
       render();
     });
+    const presenting = present.taskId === t.id && (allMode || selected.size > 0);
 
     const filters = {
       all: ['すべて', () => true],
@@ -282,9 +287,18 @@
             h('option', { value: 'new', selected: ui.answersSort === 'new' }, '新しい順'),
             h('option', { value: 'likes', selected: ui.answersSort === 'likes' }, '♥が多い順')),
           h('span', { class: 'grow' }),
-          h('label', { class: 'check' }, h('input', { type: 'checkbox', checked: present.showNames, onchange: run((e) => store.setPresent({ showNames: e.target.checked })) }), '提示画面に名前を出す'),
-          selected.size ? h('button', { class: 'small', onclick: run(() => store.setPresent({ submissionKeys: [] })) }, `提示をやめる（${selected.size}件）`) : null,
           h('a', { class: 'btn small primary', href: '/present', target: 'mb-present' }, '提示画面 ↗')),
+        h('div', { class: 'row', style: { marginTop: '10px' } },
+          h('strong', { class: 'small' }, '提示画面：'),
+          h('div', { class: 'seg' },
+            h('button', { class: present.taskId === t.id && !allMode && selected.size ? 'on' : '', onclick: run(async () => {
+              await store.setPresent({ taskId: t.id, mode: 'selected', submissionKeys: present.taskId === t.id ? present.submissionKeys : [] });
+              toast('下のカードの「提示に選ぶ」で回答を選んでください');
+            }) }, `選んだ回答${selected.size ? `（${selected.size}件）` : ''}`),
+            h('button', { class: allMode ? 'on' : '', onclick: run(() => store.setPresent({ taskId: t.id, mode: 'all' })) }, `全員の回答（${subs.length}件）`)),
+          presenting ? h('button', { class: 'small', onclick: run(() => store.setPresent({ taskId: null, submissionKeys: [], mode: 'selected' })) }, '提示をやめる') : null,
+          h('span', { class: 'grow' }),
+          h('label', { class: 'check' }, h('input', { type: 'checkbox', checked: present.showNames, onchange: run((e) => store.setPresent({ showNames: e.target.checked })) }), '提示画面に名前を出す')),
         h('p', { class: 'muted small', style: { margin: '8px 0 0' } },
           `提出 ${subs.length} / ${t.mode === 'group' ? store.state.groups.size : store.state.students.size}・クリア ${subs.filter((s) => s.status === 'cleared').length}`,
           missing.length ? `・未提出：${missing.join('、')}` : '')),
@@ -294,7 +308,8 @@
   // ---------- 課題 ----------
 
   function renderTasks() {
-    const all = store.tasks();
+    const asc = store.tasks();
+    const all = ui.taskOrder === 'old' ? asc : [...asc].reverse();
     const counts = (id) => {
       const subs = [...store.state.subs.values()].filter((s) => s.taskId === id);
       return { submitted: subs.length, cleared: subs.filter((s) => s.status === 'cleared').length };
@@ -302,7 +317,8 @@
     const move = run(async (i, d) => {
       const ids = all.map((t) => t.id);
       [ids[i], ids[i + d]] = [ids[i + d], ids[i]];
-      await store.reorderTasks(ids);
+      // 並び順の番号は「古い順」で振る
+      await store.reorderTasks(ui.taskOrder === 'old' ? ids : ids.reverse());
     });
     const rows = all.map((raw, i) => {
       const t = store.taskView(raw);
@@ -337,7 +353,16 @@
 
     fill(view,
       h('div', { class: 'row between', style: { marginBottom: '12px' } },
-        h('h1', { style: { margin: 0 } }, '課題'),
+        h('div', { class: 'row' },
+          h('h1', { style: { margin: 0 } }, '課題'),
+          h('div', { class: 'seg' }, [['new', '新しい順'], ['old', '古い順']].map(([k, label]) => h('button', {
+            class: (ui.taskOrder || 'new') === k ? 'on' : '',
+            onclick: () => {
+              ui.taskOrder = k;
+              try { localStorage.setItem('mb-task-order', k); } catch { /* 無視 */ }
+              render();
+            },
+          }, label)))),
         h('button', { class: 'primary', onclick: () => editTask(null) }, '＋ 新しい課題')),
       rows.length ? h('div', {}, rows) : h('div', { class: 'card muted' }, 'まだ課題がありません。「＋ 新しい課題」から作りましょう。'));
   }
@@ -885,6 +910,74 @@
       h('button', { class: 'danger', onclick: MB.logout }, 'ログアウト')));
   }
 
+  // ---------- タイマー ----------
+
+  // 上の「⏱」ボタン。動いている間は残り時間（経過時間）を出す
+  function startTimerButton() {
+    const btn = $('#timer-btn');
+    btn.addEventListener('click', openTimerPanel);
+    MB.onTick(() => {
+      const info = MB.timerInfo(store.state.timer);
+      btn.textContent = info ? `⏱ ${info.done ? '時間です' : info.text}${info.paused ? '（停止中）' : ''}` : '⏱ タイマー';
+      btn.classList.toggle('running', !!info && !info.paused && !info.done);
+      btn.classList.toggle('done', !!info && info.done);
+    });
+  }
+
+  function openTimerPanel() {
+    const big = h('div', { style: { fontSize: '3rem', fontWeight: 800, textAlign: 'center', fontVariantNumeric: 'tabular-nums' } });
+    const sub = h('div', { class: 'muted small', style: { textAlign: 'center' } });
+    const controls = h('div', { class: 'row', style: { justifyContent: 'center' } });
+    const label = h('input', { type: 'text', value: store.state.timer.label || '', placeholder: '表示する言葉（例：個人思考）', maxlength: 40 });
+    const minutes = h('input', { type: 'number', min: 1, max: 180, value: 5, style: { width: '80px' } });
+    const act = (action, value) => run(() => store.setTimer(action, value));
+    const startTimer = (min) => run(async () => {
+      await store.setTimer('label', label.value);
+      await store.setTimer('timer', min * 60e3);
+    });
+
+    let lastKey = '';
+    const paint = () => {
+      const t = store.state.timer;
+      const info = MB.timerInfo(t);
+      big.textContent = info ? (info.done ? '時間です' : info.text) : '—:—';
+      sub.textContent = !info ? '止まっています' : `${info.kind === 'timer' ? 'タイマー（残り）' : 'ストップウォッチ（経過）'}${info.paused ? '・一時停止中' : ''}`;
+      const key = `${t.state}:${t.kind}`;
+      if (key === lastKey) return;
+      lastKey = key;
+      fill(controls,
+        t.state === 'running' ? h('button', { onclick: act('pause') }, '⏸ 一時停止') : null,
+        t.state === 'paused' ? h('button', { class: 'primary', onclick: act('resume') }, '▶ 再開') : null,
+        t.state !== 'stopped' && t.kind === 'timer' ? h('button', { onclick: act('add', 60e3) }, '＋1分') : null,
+        t.state !== 'stopped' && t.kind === 'timer' ? h('button', { onclick: act('add', -60e3) }, '−1分') : null,
+        t.state !== 'stopped' ? h('button', { class: 'danger', onclick: act('stop') }, '■ 終わる（消す）') : null);
+    };
+    const offTick = MB.onTick(paint);
+    paint();
+
+    const m = modal(h('div', { class: 'stack' },
+      h('h2', {}, '⏱ タイマー・ストップウォッチ'),
+      h('p', { class: 'muted small', style: { margin: 0 } }, '動かすと、提示画面と生徒全員の画面の上に表示されます。'),
+      big, sub, controls,
+      h('div', { class: 'field' }, h('label', {}, '表示する言葉'), h('div', { class: 'row' }, h('div', { class: 'grow' }, label),
+        h('button', { class: 'small', onclick: () => act('label', label.value)() }, '変える'))),
+      h('div', { class: 'field' }, h('label', {}, 'タイマーを始める'),
+        h('div', { class: 'row' },
+          [1, 3, 5, 10, 15].map((n) => h('button', { onclick: startTimer(n) }, `${n}分`)),
+          h('span', { class: 'muted' }, 'または'), minutes, h('span', {}, '分'),
+          h('button', { class: 'primary', onclick: () => {
+            const n = Number(minutes.value);
+            if (!(n > 0 && n <= 180)) return toast('1〜180分で入力してください');
+            return startTimer(n)();
+          } }, '開始'))),
+      h('div', { class: 'field' }, h('label', {}, 'ストップウォッチ'),
+        h('button', { onclick: run(async () => {
+          await store.setTimer('label', label.value);
+          await store.setTimer('stopwatch');
+        }) }, '▶ 0から計る')),
+      h('div', { class: 'row' }, h('span', { class: 'grow' }), h('button', { onclick: () => m.close() }, '閉じる'))), { onClose: offTick });
+  }
+
   // ---------- 起動 ----------
 
   (async () => {
@@ -895,10 +988,13 @@
     }
     try { ui.tab = sessionStorage.getItem('mb-tab') || 'progress'; } catch { /* 無視 */ }
     store = window.Store.teacherStore(who);
+    startTimerButton();
     fill(view, h('p', { class: 'muted' }, '読み込み中…'));
-    store.on(() => {
+    store.on((types) => {
       MB.showErrors(store.state.errors);
       if (!store.state.ready) return;
+      // タイマーの数字は startTimerButton が進めるので、画面全体は描き直さない
+      if (types.size === 1 && types.has('timer')) return;
       $('#class-name').textContent = `${store.state.settings.className}（先生）`;
       $('#live').classList.add('on');
       // 入力欄やダイアログを使っている間は描き直さない（入力が消えないように）

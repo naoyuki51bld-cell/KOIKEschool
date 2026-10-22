@@ -16,10 +16,11 @@
 </head>
 <body>
   <main class="present" id="view"></main>
+  <div class="ptimer hidden" id="ptimer" title="押すと一時停止・再開"></div>
   <div class="controls">
     <button class="small" id="smaller" title="文字を小さく">A−</button>
     <button class="small" id="bigger" title="文字を大きく">A＋</button>
-    <button class="small" id="cols" title="列の数">列</button>
+    <button class="small" id="cards" title="カードの大きさ">カード：中</button>
     <button class="small" id="qr" title="参加QRコード">QR</button>
     <button class="small" id="full" title="全画面">⛶</button>
   </div>
@@ -31,32 +32,68 @@
   <script src="/js/store.js"></script>
   <script src="/js/common.js"></script>
   <script>
-    const { h, fill, $, rich, img } = MB;
+    const { h, fill, $, rich, img, toast } = MB;
     const view = $('#view');
-    const prefs = { size: 22, cols: 0 };
+    const CARD_SIZES = [['小', 200], ['中', 270], ['大', 380]];
+    const prefs = { size: 22, card: 1 };
     try { Object.assign(prefs, JSON.parse(localStorage.getItem('mb-present') || '{}')); } catch { /* 無視 */ }
+    if (!(prefs.card >= 0 && prefs.card < CARD_SIZES.length)) prefs.card = 1;
     let showQr = false;
     let store = null;
+    let answers = []; // いま並んでいる回答
+    let zoomPath = null; // 大きく見ている回答
 
     function applyPrefs() {
       document.documentElement.style.setProperty('--present-size', `${prefs.size}px`);
+      view.style.setProperty('--card', `${CARD_SIZES[prefs.card][1]}px`);
+      $('#cards').textContent = `カード：${CARD_SIZES[prefs.card][0]}`;
       try { localStorage.setItem('mb-present', JSON.stringify(prefs)); } catch { /* 無視 */ }
     }
 
-    function answerBody(s) {
+    function answerBody(s, large) {
+      const imgStyle = large ? {} : { maxHeight: '150px', objectFit: 'contain', width: '100%' };
       return [
-        s.shortAnswer ? h('div', { style: { fontSize: '1.4em', fontWeight: 800 } }, s.shortAnswer) : null,
-        s.text ? rich(s.text) : null,
-        s.drawing ? img(s.drawing, { class: 'answer-image', alt: '手書き' }) : null,
-        s.photo ? img(s.photo, { class: 'answer-image', alt: '写真' }) : null,
+        s.shortAnswer ? h('div', { style: { fontSize: large ? '1.6em' : '1.2em', fontWeight: 800 } }, s.shortAnswer) : null,
+        s.text ? h('div', { class: large ? '' : 'pclip' }, rich(s.text)) : null,
+        s.drawing ? img(s.drawing, { class: 'answer-image', alt: '手書き', style: imgStyle }) : null,
+        s.photo ? img(s.photo, { class: 'answer-image', alt: '写真', style: imgStyle }) : null,
       ];
     }
 
-    function zoom(label, s) {
-      const el = h('div', { class: 'zoom', onclick: () => el.remove() },
-        h('div', { style: { fontWeight: 800, color: 'var(--accent)', marginBottom: '12px' } }, label), ...answerBody(s));
+    // 1つを大きく見る。← → で前後に移る
+    function renderZoom() {
+      const old = $('.zoom');
+      if (old) old.remove();
+      const i = answers.findIndex((a) => a.path === zoomPath);
+      if (i < 0) { zoomPath = null; return; }
+      const a = answers[i];
+      const go = (d) => (e) => {
+        e.stopPropagation();
+        zoomPath = answers[(i + d + answers.length) % answers.length].path;
+        renderZoom();
+      };
+      const el = h('div', { class: 'zoom', onclick: () => { zoomPath = null; renderZoom(); } },
+        h('div', { class: 'row', style: { marginBottom: '12px' }, onclick: (e) => e.stopPropagation() },
+          h('strong', { style: { color: 'var(--accent)', fontSize: '1.1em' } }, a.label),
+          h('span', { class: 'muted' }, `${i + 1} / ${answers.length}`),
+          h('span', { class: 'grow' }),
+          answers.length > 1 ? h('button', { onclick: go(-1) }, '← 前') : null,
+          answers.length > 1 ? h('button', { onclick: go(1) }, '次 →') : null,
+          h('button', { onclick: () => { zoomPath = null; renderZoom(); } }, '× 閉じる')),
+        h('div', { class: 'stack', onclick: (e) => e.stopPropagation() }, ...answerBody(a, true)));
       document.body.append(el);
     }
+
+    document.addEventListener('keydown', (e) => {
+      if (!zoomPath) return;
+      const i = answers.findIndex((a) => a.path === zoomPath);
+      if (e.key === 'Escape') zoomPath = null;
+      else if (e.key === 'ArrowRight' || e.key === ' ') zoomPath = answers[(i + 1) % answers.length].path;
+      else if (e.key === 'ArrowLeft') zoomPath = answers[(i - 1 + answers.length) % answers.length].path;
+      else return;
+      e.preventDefault();
+      renderZoom();
+    });
 
     function joinBox() {
       const code = store.state.settings.joinCode;
@@ -74,27 +111,54 @@
     function render() {
       const p = store.state.present;
       const task = p.taskId ? store.state.tasks.get(p.taskId) : null;
-      const subs = task ? store.submissionsOf(task.id) : [];
-      const chosen = task ? (p.submissionKeys || []).map((k) => subs.find((s) => s.path === k)).filter(Boolean) : [];
-      const cols = prefs.cols || (chosen.length <= 1 ? 1 : chosen.length <= 4 ? 2 : chosen.length <= 6 ? 3 : 4);
-      view.style.setProperty('--cols', cols);
+      const subs = task ? store.submissionsOf(task.id).filter((s) => s.shortAnswer || s.text || s.drawing || s.photo) : [];
+      const all = p.mode === 'all';
+      const chosen = !task ? [] : all ? subs : (p.submissionKeys || []).map((k) => subs.find((s) => s.path === k)).filter(Boolean);
+      const letters = !all && chosen.length <= 26;
+      answers = chosen.map((s, i) => ({
+        ...s,
+        label: p.showNames ? s.ownerName : `回答 ${letters ? String.fromCharCode(65 + i) : i + 1}`,
+      }));
       const join = showQr || p.showQr ? joinBox() : null;
       fill(view,
         join,
         task
           ? h('div', { class: 'card ptask' }, h('h1', {}, task.title), rich(task.body),
-            task.imageV ? img({ path: `tasks/${task.id}/files/image`, v: task.imageV }, { class: 'task-image', style: { maxHeight: '35vh' } }) : null,
+            task.imageV ? img({ path: `tasks/${task.id}/files/image`, v: task.imageV }, { class: 'task-image', style: { maxHeight: '30vh' } }) : null,
             task.hint ? h('div', { class: 'hint' }, h('strong', {}, 'ヒント'), rich(task.hint)) : null)
-          : (join ? null : h('div', { class: 'card muted' }, '先生の画面の「回答」タブで「提示に選ぶ」を押すと、ここに表示されます。')),
-        chosen.length ? h('div', { class: 'pgrid' }, chosen.map((s, i) => {
-          const label = p.showNames ? s.ownerName : `回答 ${String.fromCharCode(65 + i)}`;
-          return h('div', { class: 'panswer', onclick: () => zoom(label, s) }, h('div', { class: 'label' }, label), ...answerBody(s));
-        })) : null);
+          : (join ? null : h('div', { class: 'card muted' }, '先生の画面の「回答」タブで、提示する回答を選ぶか「全員の回答」を押すと、ここに表示されます。')),
+        task ? h('div', { class: 'muted', style: { fontSize: '.8em' } },
+          all ? `全員の回答（${answers.length}件）` : `選んだ回答（${answers.length}件）`, answers.length ? '　押すと大きく表示します' : '') : null,
+        answers.length ? h('div', { class: 'pgrid' }, answers.map((a) => h('div', {
+          class: 'panswer',
+          tabindex: 0,
+          onclick: () => { zoomPath = a.path; renderZoom(); },
+          onkeydown: (e) => { if (e.key === 'Enter') { zoomPath = a.path; renderZoom(); } },
+        }, h('div', { class: 'label' }, a.label), ...answerBody(a, false)))) : null);
+      if (zoomPath) renderZoom();
+    }
+
+    function startTimer() {
+      const el = $('#ptimer');
+      el.addEventListener('click', () => {
+        const t = store.state.timer;
+        if (t.state === 'running') store.setTimer('pause').catch((e) => toast(e.message));
+        else if (t.state === 'paused') store.setTimer('resume').catch((e) => toast(e.message));
+      });
+      MB.onTick(() => {
+        const info = MB.timerInfo(store.state.timer);
+        el.classList.toggle('hidden', !info);
+        if (!info) return;
+        fill(el, info.done ? '時間です' : info.text,
+          h('small', {}, info.paused ? '一時停止中' : info.label || (info.kind === 'timer' ? '残り時間' : '経過時間')));
+        el.classList.toggle('paused', info.paused);
+        el.classList.toggle('done', info.done);
+      });
     }
 
     $('#smaller').onclick = () => { prefs.size = Math.max(14, prefs.size - 2); applyPrefs(); };
     $('#bigger').onclick = () => { prefs.size = Math.min(48, prefs.size + 2); applyPrefs(); };
-    $('#cols').onclick = () => { prefs.cols = (prefs.cols + 1) % 5; applyPrefs(); render(); };
+    $('#cards').onclick = () => { prefs.card = (prefs.card + 1) % CARD_SIZES.length; applyPrefs(); };
     $('#qr').onclick = () => { showQr = !showQr; render(); };
     $('#full').onclick = () => (document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen());
 
@@ -106,7 +170,13 @@
         return;
       }
       store = window.Store.teacherStore(who);
-      store.on(() => { if (store.state.ready) render(); });
+      startTimer();
+      store.on((types) => {
+        if (!store.state.ready) return;
+        // タイマーの数字は startTimer が進めるので、回答の並びは描き直さない
+        if (types.size === 1 && types.has('timer')) return;
+        render();
+      });
     })();
   </script>
 </body>

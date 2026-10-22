@@ -286,14 +286,15 @@ table.list select { padding: 6px 8px; }
 /* ---- 提示画面 ---- */
 .present { min-height: 100vh; display: flex; flex-direction: column; padding: 20px 28px; gap: 16px; font-size: var(--present-size, 22px); }
 .present .ptask { font-size: 1.1em; }
-.present .pgrid { flex: 1; display: grid; gap: 16px; grid-template-columns: repeat(var(--cols, 2), 1fr); align-content: start; }
-.present .panswer { background: var(--surface); border: 1px solid var(--border); border-radius: 14px; padding: 14px 18px; display: flex; flex-direction: column; gap: 8px; cursor: zoom-in; }
+.present .pgrid { flex: 1; display: grid; gap: 12px; grid-template-columns: repeat(auto-fill, minmax(var(--card, 270px), 1fr)); align-content: start; }
+.present .panswer { background: var(--surface); border: 1px solid var(--border); border-radius: 14px; padding: 10px 14px; display: flex; flex-direction: column; gap: 6px; cursor: zoom-in; font-size: .75em; max-height: 340px; overflow: hidden; }
+.present .panswer:hover, .present .panswer:focus { outline: 3px solid var(--accent); }
+.present .pclip { max-height: 6.5em; overflow: hidden; -webkit-mask-image: linear-gradient(#000 70%, transparent); mask-image: linear-gradient(#000 70%, transparent); }
 .present .panswer .label { font-size: .8em; font-weight: 800; color: var(--accent); }
-.present .panswer img { max-height: 55vh; object-fit: contain; }
 .present .controls { position: fixed; right: 12px; bottom: 12px; display: flex; gap: 6px; opacity: .25; transition: opacity .2s; }
 .present .controls:hover { opacity: 1; }
-.present .zoom { position: fixed; inset: 0; background: var(--bg); z-index: 50; padding: 24px; overflow: auto; cursor: zoom-out; font-size: 1.3em; }
-.present .zoom img { max-height: 80vh; }
+.zoom { position: fixed; inset: 0; background: var(--bg); z-index: 50; padding: 24px; overflow: auto; cursor: zoom-out; font-size: calc(var(--present-size, 22px) * 1.3); }
+.zoom .answer-image { max-height: 75vh; object-fit: contain; }
 .present .join { display: flex; align-items: center; gap: 24px; }
 
 @media (max-width: 600px) {
@@ -308,3 +309,18 @@ img.loading { min-height: 120px; background: var(--surface-2); }
 .quiz-layout { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 12px; align-items: start; }
 .quiz-layout > .card + .card { margin-top: 0; }
 @media (max-width: 900px) { .quiz-layout { grid-template-columns: 1fr; } }
+
+/* ---- タイマー ---- */
+.timer-bar { position: sticky; top: 57px; z-index: 18; display: flex; align-items: center; justify-content: center; gap: 10px; padding: 6px 16px; background: var(--accent); color: var(--accent-ink); font-weight: 700; }
+.timer-bar .t { font-size: 1.5rem; font-variant-numeric: tabular-nums; letter-spacing: .02em; }
+.timer-bar.paused { background: var(--surface-2); color: var(--text-2); }
+.timer-bar.done { background: var(--bad); color: #fff; animation: timer-blink 1s steps(2) infinite; }
+@keyframes timer-blink { 50% { opacity: .65; } }
+@media (max-width: 600px) { .timer-bar { top: 53px; } }
+.timer-btn { font-variant-numeric: tabular-nums; }
+.timer-btn.running { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+.timer-btn.done { background: var(--bad); border-color: var(--bad); color: #fff; }
+.present .ptimer { position: fixed; top: 16px; right: 20px; z-index: 40; background: var(--accent); color: var(--accent-ink); border-radius: 16px; padding: 6px 22px; font-weight: 800; font-size: 3.2em; font-variant-numeric: tabular-nums; cursor: pointer; box-shadow: 0 6px 20px rgba(0,0,0,.2); line-height: 1.2; text-align: center; }
+.present .ptimer small { display: block; font-size: .28em; font-weight: 700; opacity: .85; }
+.present .ptimer.paused { background: var(--surface-2); color: var(--text-2); }
+.present .ptimer.done { background: var(--bad); color: #fff; animation: timer-blink 1s steps(2) infinite; }

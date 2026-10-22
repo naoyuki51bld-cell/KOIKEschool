@@ -268,6 +268,16 @@
     };
   }
 
+  // タイマー（live/timer）。無いときは止まっているものとする
+  const TIMER_OFF = { kind: 'timer', state: 'stopped', durationMs: 0, accumulatedMs: 0, startedAt: null, label: '' };
+
+  function watchTimer(state, ev, onFail) {
+    return live(ref('live/timer'), (s) => {
+      state.timer = { ...TIMER_OFF, ...(s.exists() ? s.data() : {}) };
+      ev.emit('timer');
+    }, onFail);
+  }
+
   // ---------- 変更通知 ----------
 
   function emitter() {
@@ -309,6 +319,7 @@
       help: new Map(), // taskId → ヘルプ
       quizzes: new Map(), // 公開された小テスト
       scores: new Map(), // quizId → 自分の得点
+      timer: { ...TIMER_OFF },
       errors: new Map(), // 読み込めなかったもの → 理由
     };
     const offs = [];
@@ -400,6 +411,8 @@
       ev.emit('help');
     }, failed('help')));
 
+    offs.push(watchTimer(state, ev, failed('timer')));
+
     offs.push(live(F.query(col('quizzes'), F.where('published', '==', true)), (snap) => {
       ok('quizzes');
       snap.docChanges().forEach((c) => {
@@ -424,7 +437,8 @@
       .sort((a, b) => (b.date || '').localeCompare(a.date || '') || b.createdAt - a.createdAt)
       .map((q) => ({ ...q, score: state.scores.has(q.id) ? state.scores.get(q.id).score : null }));
 
-    const sortedTasks = () => [...state.tasks.values()].sort((a, b) => (a.sort - b.sort) || (a.createdAt - b.createdAt));
+    // 新しい課題ほど上
+    const sortedTasks = () => [...state.tasks.values()].sort((a, b) => (b.sort - a.sort) || (b.createdAt - a.createdAt));
 
     function ownerKey(task) {
       if (task.mode === 'group') return state.me && state.me.groupId ? `g_${state.me.groupId}` : null;
@@ -607,7 +621,7 @@
       email: who.email,
       settings: { className: '', registrationOpen: true, joinCode: '' },
       answers: {},
-      present: { taskId: null, submissionKeys: [], showNames: false, showQr: false },
+      present: { taskId: null, submissionKeys: [], mode: 'selected', showNames: false, showQr: false },
       students: new Map(),
       groups: new Map(),
       tasks: new Map(),
@@ -616,6 +630,7 @@
       likes: new Map(), // path → {pid, uid}
       quizzes: new Map(),
       scores: new Map(), // `${quizId}:${studentId}` → 得点
+      timer: { ...TIMER_OFF },
       errors: new Map(), // 読み込めなかったもの → 理由
     };
     const offs = [];
@@ -657,7 +672,7 @@
     watchDoc('config/main', 'main', (d) => Object.assign(state.settings, { className: d?.className || '', registrationOpen: !!d?.registrationOpen }));
     watchDoc('config/secret', 'secret', (d) => { state.settings.joinCode = d?.joinCode || ''; });
     watchDoc('config/answers', 'answers', (d) => { state.answers = d || {}; autoJudge(); });
-    watchDoc('config/present', 'present', (d) => { state.present = { taskId: null, submissionKeys: [], showNames: false, showQr: false, ...(d || {}) }; });
+    watchDoc('config/present', 'present', (d) => { state.present = { taskId: null, submissionKeys: [], mode: 'selected', showNames: false, showQr: false, ...(d || {}) }; });
     watchCol(col('students'), 'students', state.students, (d) => d.id, (d) => ({ id: d.id, ...d.data() }));
     watchCol(col('groups'), 'groups', state.groups, (d) => d.id, (d) => ({ id: d.id, ...d.data() }));
     watchCol(col('tasks'), 'tasks', state.tasks, (d) => d.id, (d) => ({ id: d.id, ...d.data() }));
@@ -667,6 +682,7 @@
     watchCol(F.query(F.collectionGroup(db, 'likes'), F.where('pid', '>=', '')), 'likes', state.likes, (d) => d.ref.path,
       (d) => ({ taskId: d.ref.parent.parent.id, ...d.data() }));
     watchCol(col('quizzes'), 'quizzes', state.quizzes, (d) => d.id, (d) => ({ id: d.id, ...d.data() }));
+    offs.push(watchTimer(state, ev, failed('timer')));
     watchCol(F.query(F.collectionGroup(db, 'scores'), F.where('studentId', '>=', '')), 'scores', state.scores,
       (d) => `${d.ref.parent.parent.id}:${d.id}`, (d) => ({ quizId: d.ref.parent.parent.id, ...d.data() }));
 
@@ -1020,7 +1036,7 @@
 
     const setPresent = wrap(async (patch) => {
       const next = { ...state.present, ...patch };
-      next.submissionKeys = (next.submissionKeys || []).slice(0, 8);
+      next.submissionKeys = (next.submissionKeys || []).slice(0, 24);
       state.present = next;
       await F.setDoc(ref('config/present'), next);
       return next;
@@ -1092,8 +1108,27 @@
       return writes.length;
     });
 
+    // --- タイマー ---
+    // 経過時間は「止めるまでに貯めた分（accumulatedMs）＋ 今回動かし始めてから（startedAt から）」で数える
+    const timerElapsed = (t) => (t.accumulatedMs || 0) + (t.state === 'running' && t.startedAt ? Date.now() - t.startedAt : 0);
+
+    const setTimer = wrap(async (action, value) => {
+      const t = state.timer;
+      let next;
+      if (action === 'timer') next = { ...TIMER_OFF, kind: 'timer', state: 'running', durationMs: value, startedAt: Date.now(), label: t.label || '' };
+      else if (action === 'stopwatch') next = { ...TIMER_OFF, kind: 'stopwatch', state: 'running', startedAt: Date.now(), label: t.label || '' };
+      else if (action === 'pause') next = { ...t, state: 'paused', accumulatedMs: timerElapsed(t), startedAt: null };
+      else if (action === 'resume') next = { ...t, state: 'running', startedAt: Date.now() };
+      else if (action === 'add') next = { ...t, durationMs: Math.max(0, (t.durationMs || 0) + value) };
+      else if (action === 'label') next = { ...t, label: String(value || '').slice(0, 40) };
+      else next = { ...t, state: 'stopped' };
+      state.timer = next;
+      ev.emit('timer');
+      await F.setDoc(ref('live/timer'), { ...next, updatedAt: Date.now() });
+    });
+
     return {
-      state, on: ev.on, students, groups, tasks, ownerName, submissionsOf, taskView,
+      state, on: ev.on, students, groups, tasks, ownerName, submissionsOf, taskView, setTimer,
       quizzes, scoresOf, createQuiz, updateQuiz, deleteQuiz, saveScores,
       updateSettings, addStudent, resetStudentPassword, updateStudent, deleteStudent,
       addGroup, renameGroup, deleteGroup, autoGroups,
