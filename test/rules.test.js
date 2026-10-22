@@ -165,3 +165,33 @@ test('パスワード再設定後は古いログインが使えない', async ()
   await assertSucceeds(deleteDoc(doc(as('teacher'), 'accounts/uid2')));
   await assertFails(getDoc(doc(as('uid2'), 'tasks/group/subs/g_g1')));
 });
+
+test('小テスト：生徒は公開されたテストの自分の得点だけ見られる', async () => {
+  await env.withSecurityRulesDisabled(async (ctx) => {
+    const db = ctx.firestore();
+    await setDoc(doc(db, 'quizzes/q1'), { title: '第1回', date: '2026-10-22', maxScore: 10, published: true, createdAt: 1 });
+    await setDoc(doc(db, 'quizzes/q2'), { title: '第2回', date: '2026-10-23', maxScore: 10, published: false, createdAt: 2 });
+    for (const [q, published] of [['q1', true], ['q2', false]]) {
+      await setDoc(doc(db, `quizzes/${q}/scores/s1`), { studentId: 's1', score: 8, groupId: 'g1', groupName: '1班', published, updatedAt: 1 });
+      await setDoc(doc(db, `quizzes/${q}/scores/s3`), { studentId: 's3', score: 5, groupId: 'g2', groupName: '2班', published, updatedAt: 1 });
+    }
+  });
+  const s1 = as('uid1');
+  await assertSucceeds(getDoc(doc(s1, 'quizzes/q1')));
+  await assertFails(getDoc(doc(s1, 'quizzes/q2')));
+  await assertSucceeds(getDocs(query(collection(s1, 'quizzes'), where('published', '==', true))));
+  await assertFails(getDocs(collection(s1, 'quizzes')));
+  await assertSucceeds(getDoc(doc(s1, 'quizzes/q1/scores/s1')));
+  await assertFails(getDoc(doc(s1, 'quizzes/q2/scores/s1')));
+  await assertFails(getDoc(doc(s1, 'quizzes/q1/scores/s3')));
+  await assertFails(getDocs(collection(s1, 'quizzes/q1/scores')));
+  await assertSucceeds(getDocs(query(collectionGroup(s1, 'scores'), where('studentId', '==', 's1'), where('published', '==', true))));
+  await assertFails(getDocs(query(collectionGroup(s1, 'scores'), where('studentId', '==', 's1'))));
+  await assertFails(getDocs(query(collectionGroup(s1, 'scores'), where('studentId', '==', 's3'), where('published', '==', true))));
+  // 生徒は得点を書き換えられない
+  await assertFails(updateDoc(doc(s1, 'quizzes/q1/scores/s1'), { score: 10 }));
+  await assertFails(setDoc(doc(s1, 'quizzes/q3'), { title: 'x', date: '2026-10-22', maxScore: 10, published: true, createdAt: 1 }));
+  // 先生は全員分を読める
+  await assertSucceeds(getDocs(collectionGroup(as('teacher'), 'scores')));
+  await assertSucceeds(updateDoc(doc(as('teacher'), 'quizzes/q1/scores/s1'), { score: 9 }));
+});

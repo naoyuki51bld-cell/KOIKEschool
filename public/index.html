@@ -115,7 +115,7 @@
       },
       field('参加コード', input('joinCode', 'text', { value: params.get('join') || '', autocapitalize: 'characters', placeholder: '先生が見せている6文字' })),
       field('表示名（あだ名）', input('name', 'text', { autocomplete: 'username', maxlength: 20 }), '本名ではなく、自分で決めた名前にしてください。ログインに使います'),
-      field('出席番号', h('input', { name: 'number', type: 'number', inputmode: 'numeric', min: 1, max: 999 }), '先生だけが見ます（任意）'),
+      field('出席番号', h('input', { name: 'number', type: 'number', inputmode: 'numeric', min: 1, max: 4000 }), '先生だけが見ます（任意）'),
       field('パスワード', input('password', 'password', { autocomplete: 'new-password', minlength: 6 }), '6文字以上。忘れたら先生に再設定してもらえます'),
       field('パスワード（確認）', input('password2', 'password', { autocomplete: 'new-password' })),
       h('button', { type: 'submit', class: 'primary block' }, '登録してはじめる'));

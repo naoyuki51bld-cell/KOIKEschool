@@ -303,3 +303,8 @@ table.list select { padding: 6px 8px; }
 }
 
 img.loading { min-height: 120px; background: var(--surface-2); }
+
+/* ---- 小テスト ---- */
+.quiz-layout { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 12px; align-items: start; }
+.quiz-layout > .card + .card { margin-top: 0; }
+@media (max-width: 900px) { .quiz-layout { grid-template-columns: 1fr; } }

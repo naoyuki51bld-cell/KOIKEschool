@@ -56,6 +56,14 @@
     return Array.from(new TextEncoder().encode(s), (b) => b.toString(16).padStart(2, '0')).join('');
   }
 
+  // 出席番号は空欄か 1〜4000
+  function parseNumber(value) {
+    if (value === null || value === undefined || String(value).trim() === '') return null;
+    const n = Number(String(value).normalize('NFKC').trim());
+    if (!Number.isInteger(n) || n < 1 || n > 4000) throw new Error('出席番号は1〜4000の数字で入力してください');
+    return n;
+  }
+
   function checkPassword(password) {
     const p = String(password || '');
     if (p.length < 6) throw new Error('パスワードは6文字以上にしてください');
@@ -181,8 +189,7 @@
   const register = wrap(async ({ joinCode, name, number, password }) => {
     const clean = cleanName(name);
     checkPassword(password);
-    const num = number ? Number(number) : null;
-    if (num !== null && (!Number.isInteger(num) || num < 1 || num > 999)) throw new Error('出席番号は数字で入力してください');
+    const num = parseNumber(number);
     const key = nameKey(clean);
     if ((await F.getDoc(ref(`names/${key}`))).exists()) throw new Error('その名前はすでに使われています。別の名前にしてください');
     const email = studentEmail();
@@ -300,6 +307,8 @@
       tasks: new Map(),
       subs: new Map(), // taskId → 提出
       help: new Map(), // taskId → ヘルプ
+      quizzes: new Map(), // 公開された小テスト
+      scores: new Map(), // quizId → 自分の得点
       errors: new Map(), // 読み込めなかったもの → 理由
     };
     const offs = [];
@@ -390,6 +399,30 @@
       markLoaded('help');
       ev.emit('help');
     }, failed('help')));
+
+    offs.push(live(F.query(col('quizzes'), F.where('published', '==', true)), (snap) => {
+      ok('quizzes');
+      snap.docChanges().forEach((c) => {
+        if (c.type === 'removed') state.quizzes.delete(c.doc.id);
+        else state.quizzes.set(c.doc.id, { id: c.doc.id, ...c.doc.data() });
+      });
+      ev.emit('quizzes');
+    }, failed('quizzes')));
+
+    offs.push(live(F.query(F.collectionGroup(db, 'scores'), F.where('studentId', '==', who.sid), F.where('published', '==', true)), (snap) => {
+      ok('scores');
+      snap.docChanges().forEach((c) => {
+        const quizId = c.doc.ref.parent.parent.id;
+        if (c.type === 'removed') state.scores.delete(quizId);
+        else state.scores.set(quizId, c.doc.data());
+      });
+      ev.emit('scores');
+    }, failed('scores')));
+
+    // 自分の小テストの履歴（新しい順）
+    const myQuizzes = () => [...state.quizzes.values()]
+      .sort((a, b) => (b.date || '').localeCompare(a.date || '') || b.createdAt - a.createdAt)
+      .map((q) => ({ ...q, score: state.scores.has(q.id) ? state.scores.get(q.id).score : null }));
 
     const sortedTasks = () => [...state.tasks.values()].sort((a, b) => (a.sort - b.sort) || (a.createdAt - b.createdAt));
 
@@ -560,7 +593,7 @@
 
     return {
       state, on: ev.on, sortedTasks, ownerKey, mySub, canSeePeers, submissionView, submit, setHelp, clearHelp,
-      watchPeers, toggleLike, changeName, stop: () => { offs.forEach((f) => f()); groupOffs.forEach((f) => f()); },
+      watchPeers, toggleLike, changeName, myQuizzes, stop: () => { offs.forEach((f) => f()); groupOffs.forEach((f) => f()); },
     };
   }
 
@@ -581,11 +614,13 @@
       subs: new Map(), // path → 提出
       help: new Map(), // `${taskId}:${studentId}` → ヘルプ
       likes: new Map(), // path → {pid, uid}
+      quizzes: new Map(),
+      scores: new Map(), // `${quizId}:${studentId}` → 得点
       errors: new Map(), // 読み込めなかったもの → 理由
     };
     const offs = [];
     const loaded = new Set();
-    const need = ['main', 'secret', 'answers', 'students', 'groups', 'tasks', 'subs', 'help'];
+    const need = ['main', 'secret', 'answers', 'students', 'groups', 'tasks', 'subs', 'help', 'quizzes', 'scores'];
     const markLoaded = (n) => {
       loaded.add(n);
       if (!state.ready && need.every((x) => loaded.has(x))) {
@@ -631,6 +666,9 @@
       (d) => `${d.ref.parent.parent.id}:${d.id}`, (d) => ({ taskId: d.ref.parent.parent.id, ...d.data() }));
     watchCol(F.query(F.collectionGroup(db, 'likes'), F.where('pid', '>=', '')), 'likes', state.likes, (d) => d.ref.path,
       (d) => ({ taskId: d.ref.parent.parent.id, ...d.data() }));
+    watchCol(col('quizzes'), 'quizzes', state.quizzes, (d) => d.id, (d) => ({ id: d.id, ...d.data() }));
+    watchCol(F.query(F.collectionGroup(db, 'scores'), F.where('studentId', '>=', '')), 'scores', state.scores,
+      (d) => `${d.ref.parent.parent.id}:${d.id}`, (d) => ({ quizId: d.ref.parent.parent.id, ...d.data() }));
 
     // --- 自動判定：先生の画面が開いている間、届いた短答をすぐ判定する ---
     const judging = new Set();
@@ -684,7 +722,7 @@
 
     // --- 読み出し ---
 
-    const sortStudents = (list) => list.sort((a, b) => ((a.number ?? 9999) - (b.number ?? 9999)) || a.name.localeCompare(b.name, 'ja'));
+    const sortStudents = (list) => list.sort((a, b) => ((a.number ?? 99999) - (b.number ?? 99999)) || a.name.localeCompare(b.name, 'ja'));
     const students = () => sortStudents([...state.students.values()]);
     const groups = () => [...state.groups.values()].sort((a, b) => (a.sort - b.sort) || a.name.localeCompare(b.name, 'ja'));
     const tasks = () => [...state.tasks.values()].sort((a, b) => (a.sort - b.sort) || (a.createdAt - b.createdAt));
@@ -738,7 +776,7 @@
       const sid = randomId();
       const batch = F.writeBatch(db);
       batch.set(ref(`students/${sid}`), {
-        name: clean, number: number ? Number(number) : null, uid, joinCode: '', groupId: null, createdAt: now(),
+        name: clean, number: parseNumber(number), uid, joinCode: '', groupId: null, createdAt: now(),
       });
       batch.set(ref(`accounts/${uid}`), { studentId: sid });
       batch.set(ref(`names/${key}`), { email, studentId: sid });
@@ -779,7 +817,7 @@
         }
         patch.name = clean;
       }
-      if (number !== undefined) patch.number = number ? Number(number) : null;
+      if (number !== undefined) patch.number = parseNumber(number);
       if (groupId !== undefined) patch.groupId = groupId || null;
       batch.update(ref(`students/${sid}`), patch);
       await batch.commit();
@@ -808,6 +846,7 @@
     const deleteStudent = wrap(async (sid) => {
       const st = state.students.get(sid);
       if (!st) return;
+      await commitDeletes([...state.scores.values()].filter((x) => x.studentId === sid).map((x) => `quizzes/${x.quizId}/scores/${sid}`));
       for (const s of [...state.subs.values()]) if (s.ownerType === 'user' && s.ownerId === sid) await deleteSubmission(s);
       const paths = [...state.help.values()].filter((h) => h.studentId === sid).map((h) => `tasks/${h.taskId}/help/${sid}`);
       paths.push(`names/${nameKey(st.name)}`, `students/${sid}`);
@@ -987,8 +1026,75 @@
       return next;
     });
 
+    // --- 小テスト ---
+
+    const quizzes = () => [...state.quizzes.values()]
+      .sort((a, b) => (b.date || '').localeCompare(a.date || '') || b.createdAt - a.createdAt);
+    const scoresOf = (quizId) => [...state.scores.values()].filter((x) => x.quizId === quizId);
+
+    function quizFields(v) {
+      const title = String(v.title || '').trim().slice(0, 60);
+      if (!title) throw new Error('テスト名を入力してください');
+      const maxScore = Number(v.maxScore);
+      if (!(maxScore > 0) || maxScore > 1000) throw new Error('満点は1〜1000の数で入力してください');
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(v.date || '')) throw new Error('日付を入力してください');
+      return { title, date: v.date, maxScore, published: !!v.published };
+    }
+
+    const createQuiz = wrap(async (v) => {
+      const id = randomId(12);
+      await F.setDoc(ref(`quizzes/${id}`), { ...quizFields(v), createdAt: now() });
+      return id;
+    });
+
+    // 公開・非公開を変えたときは、生徒が自分の得点を読めるかどうかも合わせて変える
+    const updateQuiz = wrap(async (id, v) => {
+      const old = state.quizzes.get(id);
+      if (!old) throw new Error('テストが見つかりません');
+      const fields = quizFields({ ...old, ...v });
+      const batch = F.writeBatch(db);
+      batch.update(ref(`quizzes/${id}`), fields);
+      if (fields.published !== !!old.published) {
+        for (const x of scoresOf(id)) batch.update(ref(`quizzes/${id}/scores/${x.studentId}`), { published: fields.published });
+      }
+      await batch.commit();
+    });
+
+    const deleteQuiz = wrap(async (id) => {
+      await commitDeletes([...scoresOf(id).map((x) => `quizzes/${id}/scores/${x.studentId}`), `quizzes/${id}`]);
+    });
+
+    // entries: [{ studentId, score }]（score が null なら未入力・欠席として消す）
+    const saveScores = wrap(async (quizId, entries) => {
+      const q = state.quizzes.get(quizId);
+      if (!q) throw new Error('テストが見つかりません');
+      const writes = [];
+      for (const { studentId, score } of entries) {
+        const path = `quizzes/${quizId}/scores/${studentId}`;
+        const old = state.scores.get(`${quizId}:${studentId}`);
+        if (score === null) {
+          if (old) writes.push((b) => b.delete(ref(path)));
+          continue;
+        }
+        if (!(score >= 0 && score <= q.maxScore)) throw new Error(`得点は0〜${q.maxScore}点で入力してください`);
+        if (old && old.score === score) continue;
+        // 班は最初に入力したときのものを残す（あとで班替えしても過去の記録が変わらないように）
+        const st = state.students.get(studentId);
+        const groupId = old ? old.groupId : (st && st.groupId) || null;
+        const groupName = old ? old.groupName : (groupId && state.groups.get(groupId)?.name) || '';
+        writes.push((b) => b.set(ref(path), { studentId, score, groupId, groupName, published: !!q.published, updatedAt: now() }));
+      }
+      for (let i = 0; i < writes.length; i += 400) {
+        const batch = F.writeBatch(db);
+        writes.slice(i, i + 400).forEach((w) => w(batch));
+        await batch.commit();
+      }
+      return writes.length;
+    });
+
     return {
       state, on: ev.on, students, groups, tasks, ownerName, submissionsOf, taskView,
+      quizzes, scoresOf, createQuiz, updateQuiz, deleteQuiz, saveScores,
       updateSettings, addStudent, resetStudentPassword, updateStudent, deleteStudent,
       addGroup, renameGroup, deleteGroup, autoGroups,
       createTask, updateTask, rejudge, duplicateTask, reorderTasks, deleteTask,

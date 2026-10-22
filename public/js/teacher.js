@@ -8,6 +8,8 @@
     tab: 'progress',
     answersTaskId: null,
     answersFilter: 'all',
+    quizId: null, // 得点入力中の小テスト
+    scoreDraft: {}, // 保存前の得点（生徒ID → 入力中の文字）
     answersSort: 'time',
     boardSort: 'number',
     showClosed: true,
@@ -17,6 +19,7 @@
     ['progress', '進捗'],
     ['answers', '回答'],
     ['tasks', '課題'],
+    ['quizzes', '小テスト'],
     ['students', '生徒・グループ'],
     ['settings', '設定'],
   ];
@@ -48,7 +51,7 @@
 
   function render() {
     renderTabs();
-    ({ progress: renderProgress, answers: renderAnswers, tasks: renderTasks, students: renderStudents, settings: renderSettings })[ui.tab]();
+    ({ progress: renderProgress, answers: renderAnswers, tasks: renderTasks, quizzes: renderQuizzes, students: renderStudents, settings: renderSettings })[ui.tab]();
   }
 
   const groupName = (id) => (store.state.groups.get(id) || {}).name || '';
@@ -67,7 +70,7 @@
     const groups = store.groups();
     if (ui.boardSort === 'group') {
       const order = new Map(groups.map((g, i) => [g.id, i]));
-      students.sort((a, b) => (order.get(a.groupId) ?? 999) - (order.get(b.groupId) ?? 999) || (a.number ?? 999) - (b.number ?? 999));
+      students.sort((a, b) => (order.get(a.groupId) ?? 999) - (order.get(b.groupId) ?? 999) || (a.number ?? 99999) - (b.number ?? 99999));
     }
     const help = [...state.help.values()];
     const nameOf = (sid) => (state.students.get(sid) || {}).name || '?';
@@ -457,6 +460,273 @@
         v.status !== 'open' ? h('button', { class: 'primary', onclick: (e) => save('open', e.currentTarget) }, '保存して公開') : null)), { wide: true });
     refreshKind();
     title.focus();
+  }
+
+  // ---------- 小テスト ----------
+
+  const round1 = (x) => Math.round(x * 10) / 10;
+  const pct = (score, max) => (max ? (score / max) * 100 : 0);
+  const today = () => new Date(Date.now() - new Date().getTimezoneOffset() * 60e3).toISOString().slice(0, 10);
+
+  function stats(list) {
+    if (!list.length) return null;
+    const xs = list.map((x) => x.score);
+    return { n: xs.length, avg: xs.reduce((a, b) => a + b, 0) / xs.length, max: Math.max(...xs), min: Math.min(...xs) };
+  }
+
+  // 1回のテストのグループ平均（得点を入れたときの班で集計する）
+  function groupStats(q) {
+    const by = new Map();
+    for (const x of store.scoresOf(q.id)) {
+      if (!x.groupId) continue;
+      if (!by.has(x.groupId)) by.set(x.groupId, { groupId: x.groupId, name: store.state.groups.get(x.groupId)?.name || x.groupName || '(削除されたグループ)', list: [] });
+      by.get(x.groupId).list.push(x);
+    }
+    const rows = [...by.values()].map((g) => {
+      const s = stats(g.list);
+      return { ...g, n: s.n, avg: s.avg, rate: pct(s.avg, q.maxScore) };
+    }).sort((a, b) => b.avg - a.avg);
+    rows.forEach((r, i) => { r.rank = i > 0 && r.avg === rows[i - 1].avg ? rows[i - 1].rank : i + 1; });
+    return rows;
+  }
+
+  // これまでのテスト全体でのグループ順位（各回の班平均の得点率を平均する）
+  function groupTotals() {
+    const by = new Map();
+    for (const q of store.quizzes()) {
+      for (const g of groupStats(q)) {
+        if (!by.has(g.groupId)) by.set(g.groupId, { name: g.name, rates: [] });
+        by.get(g.groupId).rates.push(g.rate);
+      }
+    }
+    const rows = [...by.values()].map((g) => ({ ...g, rate: g.rates.reduce((a, b) => a + b, 0) / g.rates.length }))
+      .sort((a, b) => b.rate - a.rate);
+    rows.forEach((r, i) => { r.rank = i > 0 && round1(r.rate) === round1(rows[i - 1].rate) ? rows[i - 1].rank : i + 1; });
+    return rows;
+  }
+
+  const rankTable = (rows, cols) => h('table', { class: 'list' },
+    h('thead', {}, h('tr', {}, cols.map(([label]) => h('th', {}, label)))),
+    h('tbody', {}, rows.map((r) => h('tr', { style: r.rank === 1 ? { fontWeight: 700 } : {} }, cols.map(([, fn]) => h('td', {}, fn(r)))))));
+
+  function renderQuizzes() {
+    if (ui.quizId && store.state.quizzes.has(ui.quizId)) return renderQuiz(store.state.quizzes.get(ui.quizId));
+    ui.quizId = null;
+    const list = store.quizzes();
+    const total = store.state.students.size;
+    const cards = list.map((q) => {
+      const s = stats(store.scoresOf(q.id));
+      return h('div', { class: 'card' },
+        h('div', { class: 'row between' },
+          h('div', { class: 'grow', style: { minWidth: '200px' } },
+            h('strong', {}, q.title),
+            h('div', { class: 'row small muted', style: { gap: '8px', marginTop: '4px' } },
+              h('span', {}, q.date), h('span', {}, `満点 ${q.maxScore}点`),
+              h('span', {}, `入力 ${s ? s.n : 0} / ${total}人`),
+              s ? h('span', {}, `平均 ${round1(s.avg)}点（${round1(pct(s.avg, q.maxScore))}%）`) : null,
+              h('span', { class: `badge ${q.published ? 'open' : 'draft'}` }, q.published ? '生徒に公開中' : '非公開'))),
+          h('div', { class: 'row' },
+            h('button', { class: 'small primary', onclick: () => { ui.quizId = q.id; ui.scoreDraft = {}; render(); } }, '得点入力・結果'),
+            h('button', { class: 'small', onclick: run(() => store.updateQuiz(q.id, { published: !q.published })) }, q.published ? '非公開にする' : '生徒に公開'),
+            h('button', { class: 'small', onclick: () => editQuiz(q) }, '編集'),
+            h('button', { class: 'small danger', onclick: run(async () => {
+              if (!window.confirm(`「${q.title}」を削除しますか？ 入力した得点もすべて消えます。`)) return;
+              await store.deleteQuiz(q.id);
+              toast('削除しました');
+            }) }, '削除'))));
+    });
+
+    const totals = groupTotals();
+    fill(view,
+      h('div', { class: 'row between', style: { marginBottom: '12px' } },
+        h('h1', { style: { margin: 0 } }, '小テスト'),
+        h('div', { class: 'row' },
+          list.length ? h('button', { class: 'small', onclick: downloadScoresCsv }, 'CSVで保存') : null,
+          h('button', { class: 'primary', onclick: () => editQuiz(null) }, '＋ 新しいテスト'))),
+      list.length ? h('div', {}, cards) : h('div', { class: 'card muted' }, 'まだ小テストがありません。「＋ 新しいテスト」から作り、得点を入力しましょう。'),
+      totals.length ? h('div', { class: 'card', style: { marginTop: '12px' } },
+        h('h2', {}, 'グループ対抗（これまでの合計）'),
+        h('p', { class: 'muted small', style: { marginTop: 0 } }, '各回のグループ平均の得点率を平均した順位です。先生だけが見られます。班は得点を入力したときの班で数えます。'),
+        rankTable(totals, [
+          ['順位', (r) => `${r.rank}位`],
+          ['グループ', (r) => r.name],
+          ['平均得点率', (r) => `${round1(r.rate)}%`],
+          ['回数', (r) => `${r.rates.length}回`],
+        ])) : null);
+  }
+
+  function renderQuiz(q) {
+    const students = store.students();
+    const saved = new Map(store.scoresOf(q.id).map((x) => [x.studentId, x]));
+    const draft = ui.scoreDraft || (ui.scoreDraft = {});
+    const valueOf = (sid) => (sid in draft ? draft[sid] : saved.has(sid) ? String(saved.get(sid).score) : '');
+    const dirty = () => Object.keys(draft).some((sid) => draft[sid] !== (saved.has(sid) ? String(saved.get(sid).score) : ''));
+    const inputs = [];
+    const error = h('div', { class: 'error' });
+
+    const rows = students.map((st, i) => {
+      const input = h('input', {
+        type: 'text',
+        inputmode: 'decimal',
+        value: valueOf(st.id),
+        placeholder: '—',
+        style: { width: '90px', padding: '6px 8px' },
+        oninput: (e) => { draft[st.id] = e.target.value; },
+        onkeydown: (e) => {
+          if (e.key === 'Enter' || e.key === 'ArrowDown') { e.preventDefault(); inputs[i + 1]?.focus(); }
+          if (e.key === 'ArrowUp') { e.preventDefault(); inputs[i - 1]?.focus(); }
+        },
+      });
+      inputs.push(input);
+      const sv = saved.get(st.id);
+      return h('tr', {},
+        h('td', {}, st.number ?? '—'),
+        h('td', {}, st.name),
+        h('td', { class: 'muted small' }, sv ? sv.groupName || '' : groupName(st.groupId)),
+        h('td', {}, input, h('span', { class: 'muted small' }, ` / ${q.maxScore}`)));
+    });
+
+    const save = run(async (e) => {
+      error.textContent = '';
+      const entries = [];
+      for (const st of students) {
+        const raw = String(valueOf(st.id)).normalize('NFKC').trim();
+        if (raw === '') { entries.push({ studentId: st.id, score: null }); continue; }
+        const n = Number(raw);
+        if (!Number.isFinite(n) || n < 0 || n > q.maxScore) {
+          error.textContent = `${st.name}：得点は0〜${q.maxScore}の数で入力してください`;
+          return;
+        }
+        entries.push({ studentId: st.id, score: n });
+      }
+      e.target.disabled = true;
+      const changed = await store.saveScores(q.id, entries);
+      ui.scoreDraft = {};
+      toast(changed ? `保存しました（${changed}件）` : '変更はありません');
+      render();
+    });
+
+    // Excel などから「出席番号 点数」をまとめて貼り付ける
+    const paste = () => {
+      const ta = h('textarea', { placeholder: '1行に「出席番号 点数」。Excel の2列をそのまま貼り付けられます\n例：\n3101\t8\n3102\t10', style: { minHeight: '180px' } });
+      const msg = h('div', { class: 'small' });
+      const m = modal(h('div', { class: 'stack' },
+        h('h2', {}, 'まとめて貼り付け'), ta, msg,
+        h('div', { class: 'row' }, h('span', { class: 'grow' }),
+          h('button', { onclick: () => m.close() }, 'キャンセル'),
+          h('button', { class: 'primary', onclick: () => {
+            const byNumber = new Map(students.filter((s) => s.number != null).map((s) => [s.number, s]));
+            const missing = [];
+            let count = 0;
+            for (const line of ta.value.normalize('NFKC').split(/\r?\n/)) {
+              const cols = line.trim().split(/[\s,]+/).filter(Boolean);
+              if (cols.length < 2) continue;
+              const st = byNumber.get(Number(cols[0]));
+              if (!st) { missing.push(cols[0]); continue; }
+              draft[st.id] = cols[cols.length - 1];
+              count++;
+            }
+            m.close();
+            render();
+            toast(`${count}人分を入れました。確かめてから「保存」を押してください${missing.length ? `（見つからない番号：${missing.join('、')}）` : ''}`);
+          } }, '入れる'))));
+      ta.focus();
+    };
+
+    const s = stats(store.scoresOf(q.id));
+    const gs = groupStats(q);
+    const results = h('div', { class: 'card' },
+      h('h2', {}, '結果'),
+      s ? h('div', { class: 'row', style: { gap: '20px', marginBottom: '12px' } },
+        ...[['受験', `${s.n}人`], ['平均', `${round1(s.avg)}点`], ['得点率', `${round1(pct(s.avg, q.maxScore))}%`], ['最高', `${s.max}点`], ['最低', `${s.min}点`]]
+          .map(([k, v]) => h('div', {}, h('div', { class: 'muted small' }, k), h('div', { style: { fontSize: '1.3rem', fontWeight: 700 } }, v))))
+        : h('p', { class: 'muted' }, 'まだ得点が入力されていません。'),
+      gs.length ? h('div', {},
+        h('h3', {}, 'グループ対抗（このテスト）'),
+        rankTable(gs, [
+          ['順位', (r) => `${r.rank}位`],
+          ['グループ', (r) => r.name],
+          ['平均点', (r) => `${round1(r.avg)}点`],
+          ['得点率', (r) => h('div', {}, `${round1(r.rate)}%`, h('div', { class: 'meter', style: { width: '120px' } }, h('i', { style: { width: `${Math.min(100, r.rate)}%`, background: 'var(--accent)' } })))],
+          ['受験', (r) => `${r.n}人`],
+        ]),
+        h('p', { class: 'muted small' }, 'グループの平均は、そのテストを受けたメンバーだけで計算します。先生だけが見られます。')) : null);
+
+    fill(view,
+      h('div', { class: 'row', style: { marginBottom: '12px' } },
+        h('button', { class: 'small', onclick: () => {
+          if (dirty() && !window.confirm('保存していない得点があります。戻りますか？')) return;
+          ui.quizId = null; ui.scoreDraft = {}; render();
+        } }, '← 小テスト一覧'),
+        h('h1', { style: { margin: 0 } }, q.title),
+        h('span', { class: 'muted' }, `${q.date}・満点 ${q.maxScore}点`),
+        h('span', { class: `badge ${q.published ? 'open' : 'draft'}` }, q.published ? '生徒に公開中' : '非公開'),
+        h('span', { class: 'grow' }),
+        h('button', { class: 'small', onclick: run(() => store.updateQuiz(q.id, { published: !q.published })) }, q.published ? '非公開にする' : '生徒に公開')),
+      h('div', { class: 'quiz-layout' },
+        h('div', { class: 'card' },
+          h('div', { class: 'row between' },
+            h('h2', { style: { margin: 0 } }, '得点の入力'),
+            h('button', { class: 'small', onclick: paste }, 'まとめて貼り付け')),
+          h('p', { class: 'muted small' }, '空欄は未受験（欠席）として集計しません。Enter で次の人に進みます。'),
+          students.length ? h('table', { class: 'list' },
+            h('thead', {}, h('tr', {}, h('th', {}, '番号'), h('th', {}, '名前'), h('th', {}, '班'), h('th', {}, '得点'))),
+            h('tbody', {}, rows)) : h('p', { class: 'muted' }, '生徒がまだ登録していません。'),
+          error,
+          h('div', { class: 'row', style: { position: 'sticky', bottom: 0, background: 'var(--surface)', padding: '10px 0' } },
+            h('button', { class: 'primary', onclick: save }, '保存'))),
+        results));
+  }
+
+  function editQuiz(q) {
+    const title = h('input', { type: 'text', value: q ? q.title : '', placeholder: '例：第3回 小テスト（二次関数）' });
+    const date = h('input', { type: 'date', value: q ? q.date : today() });
+    const max = h('input', { type: 'number', inputmode: 'decimal', min: 1, value: q ? q.maxScore : 10 });
+    const pub = h('input', { type: 'checkbox', checked: q ? q.published : false });
+    const error = h('div', { class: 'error' });
+    const m = modal(h('div', { class: 'stack' },
+      h('h2', {}, q ? 'テストを編集' : '新しいテスト'),
+      h('div', { class: 'field' }, h('label', {}, 'テスト名'), title),
+      h('div', { class: 'row' },
+        h('div', { class: 'field grow' }, h('label', {}, '実施日'), date),
+        h('div', { class: 'field grow' }, h('label', {}, '満点'), max)),
+      h('label', { class: 'check' }, pub, '生徒に公開する（生徒は自分の得点だけを見られます）'),
+      error,
+      h('div', { class: 'row' }, h('span', { class: 'grow' }),
+        h('button', { onclick: () => m.close() }, 'キャンセル'),
+        h('button', { class: 'primary', onclick: async (e) => {
+          const v = { title: title.value, date: date.value, maxScore: max.value, published: pub.checked };
+          e.currentTarget.disabled = true;
+          try {
+            if (q) {
+              await store.updateQuiz(q.id, v);
+            } else {
+              ui.quizId = await store.createQuiz(v);
+              ui.scoreDraft = {};
+            }
+            m.close();
+            render();
+          } catch (err) {
+            error.textContent = err.message;
+            e.target.disabled = false;
+          }
+        } }, q ? '保存' : '作って得点を入力'))));
+    title.focus();
+  }
+
+  function downloadScoresCsv() {
+    const list = [...store.quizzes()].reverse();
+    const esc = (v) => `"${String(v ?? '').replace(/"/g, '""')}"`;
+    const lines = [['出席番号', '名前', ...list.map((q) => `${q.title}（${q.date}・${q.maxScore}点）`)].map(esc).join(',')];
+    for (const st of store.students()) {
+      const cells = list.map((q) => store.state.scores.get(`${q.id}:${st.id}`)?.score ?? '');
+      lines.push([st.number ?? '', st.name, ...cells].map(esc).join(','));
+    }
+    const blob = new Blob([`﻿${lines.join('\r\n')}\r\n`], { type: 'text/csv;charset=utf-8' });
+    const a = h('a', { href: URL.createObjectURL(blob), download: `小テスト_${today()}.csv` });
+    document.body.append(a);
+    a.click();
+    a.remove();
   }
 
   // ---------- 生徒・グループ ----------

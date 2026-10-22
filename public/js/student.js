@@ -17,6 +17,7 @@
   function route() {
     const m = /^#\/task\/([\w-]+)/.exec(location.hash);
     if (m) openTask(m[1]);
+    else if (location.hash === '#/quizzes') showQuizzes();
     else showList();
   }
 
@@ -59,11 +60,48 @@
     const cleared = tasks.filter((t) => statusOf(t) === 'cleared').length;
     fill(view,
       installBanner(),
+      sectionTabs('tasks'),
       h('div', { class: 'row between', style: { marginBottom: '8px' } },
         h('h1', { style: { margin: 0 } }, '課題'),
         tasks.length ? h('span', { class: 'muted small' }, `クリア ${cleared} / ${tasks.length}`) : null),
       groupLine,
       tasks.length ? h('div', {}, items) : h('div', { class: 'card muted' }, 'まだ課題はありません。先生が課題を出すと、ここに表示されます。'));
+  }
+
+  // 「課題」と「小テスト」の切り替え
+  function sectionTabs(active) {
+    return h('div', { class: 'seg', style: { width: '100%', marginBottom: '12px' } },
+      h('button', { class: active === 'tasks' ? 'on' : '', style: { flex: 1 }, onclick: () => { location.hash = ''; } }, '課題'),
+      h('button', { class: active === 'quizzes' ? 'on' : '', style: { flex: 1 }, onclick: () => { location.hash = '#/quizzes'; } }, '小テスト'));
+  }
+
+  // ---------- 小テストの履歴（自分の得点だけ） ----------
+
+  function showQuizzes() {
+    closeTask();
+    const list = store.myQuizzes();
+    const taken = list.filter((q) => q.score !== null);
+    const rate = (q) => (q.score / q.maxScore) * 100;
+    const avgRate = taken.length ? taken.reduce((a, q) => a + rate(q), 0) / taken.length : null;
+    const round1 = (x) => Math.round(x * 10) / 10;
+    fill(view,
+      sectionTabs('quizzes'),
+      h('h1', {}, '小テストの記録'),
+      taken.length ? h('div', { class: 'card row', style: { gap: '24px', marginBottom: '12px' } },
+        h('div', {}, h('div', { class: 'muted small' }, '受けた回数'), h('div', { style: { fontSize: '1.4rem', fontWeight: 700 } }, `${taken.length}回`)),
+        h('div', {}, h('div', { class: 'muted small' }, '平均の得点率'), h('div', { style: { fontSize: '1.4rem', fontWeight: 700 } }, `${round1(avgRate)}%`))) : null,
+      list.length
+        ? h('div', {}, list.map((q) => h('div', { class: 'card' },
+          h('div', { class: 'row between' },
+            h('div', {}, h('strong', {}, q.title), h('div', { class: 'muted small' }, q.date)),
+            q.score === null
+              ? h('span', { class: 'badge' }, '記録なし')
+              : h('div', { style: { textAlign: 'right' } },
+                h('span', { style: { fontSize: '1.4rem', fontWeight: 800 } }, q.score),
+                h('span', { class: 'muted' }, ` / ${q.maxScore}点`))),
+          q.score === null ? null : h('div', { class: 'meter', style: { height: '8px', marginTop: '8px' } },
+            h('i', { style: { width: `${Math.min(100, rate(q))}%`, background: rate(q) >= 80 ? 'var(--good)' : rate(q) >= 50 ? 'var(--accent)' : 'var(--warn)' } })))))
+        : h('div', { class: 'card muted' }, 'まだ小テストの記録はありません。先生が得点を公開すると、ここに表示されます。'));
   }
 
   // ホーム画面にまだ追加していない人への案内（「あとで」を押したら7日間は出さない）
@@ -526,7 +564,8 @@
     }
     $('#class-name').textContent = store.state.className;
     if (!current) {
-      if (!/^#\/task\//.test(location.hash)) showList();
+      if (location.hash === '#/quizzes') showQuizzes();
+      else if (!/^#\/task\//.test(location.hash)) showList();
       return;
     }
     const data = taskData(current.taskId);

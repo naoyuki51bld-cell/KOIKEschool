@@ -223,6 +223,20 @@ service cloud.firestore {
           : d.status == (wasCleared ? 'cleared' : 'submitted'));
     }
 
+    // ---------- 小テスト ----------
+
+    // 生徒が見られるのは「生徒に公開」したテストと、その中の自分の得点だけ。
+    // グループの平均点などは先生の画面で計算するので、生徒には他人の得点は届かない
+    match /quizzes/{q} {
+      allow read: if isTeacher() || (signedIn() && resource.data.published == true);
+      allow write: if isTeacher();
+
+      match /scores/{sid} {
+        allow read: if isTeacher() || (hasAccount() && mySid() == sid && resource.data.published == true);
+        allow write: if isTeacher();
+      }
+    }
+
     // ---------- コレクショングループ（一覧の読み込み） ----------
 
     match /{path=**}/subs/{key} {
@@ -232,6 +246,10 @@ service cloud.firestore {
     }
     match /{path=**}/help/{sid} {
       allow read: if isTeacher() || (hasAccount() && resource.data.studentId == mySid());
+    }
+    match /{path=**}/scores/{sid} {
+      allow read: if isTeacher()
+        || (hasAccount() && resource.data.studentId == mySid() && resource.data.published == true);
     }
     match /{path=**}/likes/{lid} {
       allow read: if isTeacher();
