@@ -167,8 +167,10 @@ service cloud.firestore {
 
         match /files/{f} {
           allow read: if isTeacher() || (hasAccount() && canSeePeers(t));
-          allow write: if hasAccount() && ownsPeer(t, pid) && f in ['drawing', 'photo']
+          allow create, update: if hasAccount() && ownsPeer(t, pid) && f in ['drawing', 'photo']
             && request.resource.data.keys().hasOnly(['data', 'v']);
+          // 生徒・グループ・課題を消すときに、先生が一緒に消す
+          allow delete: if isTeacher();
         }
       }
 

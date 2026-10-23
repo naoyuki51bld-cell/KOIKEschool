@@ -203,3 +203,18 @@ test('タイマー：全員が見られて、動かせるのは先生だけ', as
   await assertFails(setDoc(doc(as('uid1'), 'live/timer'), { ...timer, state: 'stopped' }));
   await assertFails(getDoc(doc(env.unauthenticatedContext().firestore(), 'live/timer')));
 });
+
+test('先生は提出のある生徒・グループを消せる（匿名コピーのファイルも含めて）', async () => {
+  const t = as('teacher');
+  // 提出・匿名コピー・その画像・参考になった、をまとめて消す（アプリの削除と同じ組み合わせ）
+  const b = writeBatch(t);
+  for (const p of [
+    'tasks/group/subs/g_g1/files/drawing', 'tasks/group/subs/g_g1/files/photo',
+    'tasks/group/peers/p_g1/files/drawing', 'tasks/group/peers/p_g1/files/photo',
+    'tasks/group/peers/p_g1', 'tasks/group/likes/p_g1_uid3', 'tasks/group/subs/g_g1',
+    'tasks/short/help/s1', 'students/s1', 'accounts/uid1', 'groups/g1',
+  ]) b.delete(doc(t, p));
+  await assertSucceeds(b.commit());
+  // 生徒は匿名コピーの画像を消せない
+  await assertFails(deleteDoc(doc(as('uid3'), 'tasks/group/peers/p_g2/files/drawing')));
+});
