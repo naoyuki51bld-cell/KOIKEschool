@@ -3,6 +3,7 @@
   const view = $('#view');
   const tabsEl = $('#tabs');
   let store = null;
+  let who = null; // ログイン中の先生
 
   const ui = {
     tab: 'progress',
@@ -59,7 +60,7 @@
 
   function submissionFor(task, student) {
     const key = task.mode === 'group' ? (student.groupId ? `g_${student.groupId}` : null) : `u_${student.id}`;
-    return key ? store.state.subs.get(`tasks/${task.id}/subs/${key}`) || null : null;
+    return key ? store.state.subs.get(`classes/${store.state.classId}/subs/${task.id}__${key}`) || null : null;
   }
 
   // ---------- 進捗 ----------
@@ -213,6 +214,7 @@
       ui.answersTaskId = (open[0] || usable[0]).id;
     }
     const t = store.taskView(store.state.tasks.get(ui.answersTaskId));
+    store.watchLikes(t.id);
     const subs = store.submissionsOf(t.id);
     const present = store.state.present;
     const allMode = present.taskId === t.id && present.mode === 'all';
@@ -287,7 +289,7 @@
             h('option', { value: 'new', selected: ui.answersSort === 'new' }, '新しい順'),
             h('option', { value: 'likes', selected: ui.answersSort === 'likes' }, '♥が多い順')),
           h('span', { class: 'grow' }),
-          h('a', { class: 'btn small primary', href: '/present', target: 'mb-present' }, '提示画面 ↗')),
+          h('a', { class: 'btn small primary', href: `/present?class=${encodeURIComponent(store.state.classId)}`, target: 'mb-present' }, '提示画面 ↗')),
         h('div', { class: 'row', style: { marginTop: '10px' } },
           h('strong', { class: 'small' }, '提示画面：'),
           h('div', { class: 'seg' },
@@ -854,8 +856,8 @@
               showPassword(st.name, r.password, '新しいパスワード');
             }) }, 'パスワード再設定'),
             h('button', { class: 'small danger', onclick: run(async () => {
-              if (window.confirm(`${st.name} を削除しますか？ この生徒の個人提出も消えます。`)) await store.deleteStudent(st.id);
-            }) }, '削除')))))) : h('p', { class: 'muted' }, 'まだ誰も登録していません。'));
+              if (window.confirm(`${st.name} をこのクラスから外しますか？ このクラスでの提出と小テストの得点も消えます（生徒のアカウントは残り、ほかのクラスはそのまま使えます）。`)) await store.deleteStudent(st.id);
+            }) }, 'クラスから外す')))))) : h('p', { class: 'muted' }, 'まだ誰も登録していません。'));
 
     fill(view, join, h('div', { style: { height: '12px' } }), groupCard, h('div', { style: { height: '12px' } }), table);
 
@@ -887,27 +889,114 @@
   // ---------- 設定 ----------
 
   function renderSettings() {
-    const cls = h('input', { type: 'text', value: store.state.settings.className });
+    const st = store.state.settings;
+    const isOwner = st.ownerUid === who.uid;
+    const cls = h('input', { type: 'text', value: st.className });
     const cur = h('input', { type: 'password', placeholder: '今のパスワード', autocomplete: 'current-password' });
     const next = h('input', { type: 'password', placeholder: '新しいパスワード', autocomplete: 'new-password' });
-    fill(view, h('div', { class: 'card', style: { maxWidth: '560px' } },
-      h('h2', {}, '設定'),
-      h('div', { class: 'field' }, h('label', {}, 'クラス名'), h('div', { class: 'row' }, h('div', { class: 'grow' }, cls),
-        h('button', { onclick: run(async () => { await store.updateSettings({ className: cls.value }); toast('保存しました'); }) }, '保存'))),
-      h('div', { class: 'field' }, h('label', {}, '先生のパスワードを変える', h('div', { class: 'help' }, `ログイン用メールアドレス：${store.state.email}`)),
-        h('div', { class: 'stack' }, cur, next),
-        h('button', { style: { marginTop: '8px' }, onclick: run(async () => {
-          await window.Store.changePassword(cur.value, next.value);
-          toast('変更しました');
-          cur.value = '';
-          next.value = '';
-        }) }, '変更')),
-      h('div', { class: 'field' }, h('label', {}, 'ホーム画面・デスクトップに追加',
-        h('div', { class: 'help' }, '先生の画面もアプリのように開けます。生徒のスマホには、課題一覧に追加の案内が出ます')),
-      MB.install.standalone()
-        ? h('p', { class: 'muted small' }, '追加済みのアプリで開いています')
-        : h('button', { onclick: () => MB.install.prompt() }, '📲 追加する')),
-      h('button', { class: 'danger', onclick: MB.logout }, 'ログアウト')));
+
+    // 担当の先生（共同担当）
+    const coBox = h('div', { class: 'muted small' }, '読み込み中…');
+    window.Store.listTeachers().then((teachers) => {
+      const byUid = new Map(teachers.map((t) => [t.uid, t]));
+      const label = (uid) => (byUid.get(uid) ? `${byUid.get(uid).name}（${byUid.get(uid).email}）` : '（登録が消えた先生）');
+      const others = teachers.filter((t) => !st.teacherUids.includes(t.uid));
+      const pick = h('select', { style: { width: 'auto' } }, h('option', { value: '' }, '先生を選ぶ'), others.map((t) => h('option', { value: t.uid }, `${t.name}（${t.email}）`)));
+      fill(coBox,
+        h('ul', { style: { margin: '0 0 8px', paddingLeft: '20px' } }, st.teacherUids.map((uid) => h('li', {},
+          label(uid), uid === st.ownerUid ? '・クラスを作った先生' : '',
+          isOwner && uid !== st.ownerUid ? h('button', { class: 'small danger', style: { marginLeft: '8px' }, onclick: run(async () => {
+            if (!window.confirm(`${label(uid)} を担当から外しますか？`)) return;
+            await store.setCoTeacher(uid, false);
+            toast('担当から外しました');
+          }) }, '外す') : null))),
+        isOwner
+          ? (others.length ? h('div', { class: 'row' }, pick, h('button', { class: 'small', onclick: run(async () => {
+            if (!pick.value) return toast('先生を選んでください');
+            await store.setCoTeacher(pick.value, true);
+            toast('共同担当に加えました');
+          }) }, '＋ 共同担当に加える')) : h('p', { class: 'muted small' }, 'ほかに登録している先生はいません。'))
+          : h('p', { class: 'muted small' }, '担当の先生を変えられるのは、クラスを作った先生だけです。'));
+    }).catch((e) => fill(coBox, e.message));
+
+    const adminCard = who.admin ? h('div', { class: 'card', style: { maxWidth: '640px' } },
+      h('h2', {}, '管理者：先生の招待'),
+      h('p', { class: 'muted small', style: { marginTop: 0 } }, 'この招待コードを渡した先生だけが、ログイン画面の「先生の登録」から登録できます。コードを作り直すと、古いコードは使えなくなります。'),
+      (() => {
+        const code = h('div', { class: 'code-big' }, '…');
+        const list = h('div', { class: 'small' });
+        window.Store.teacherInvite(false).then((c) => { code.textContent = c; });
+        window.Store.listTeachers().then((ts) => fill(list, h('strong', {}, `登録している先生（${ts.length}人）`), h('ul', { style: { margin: '4px 0 0', paddingLeft: '20px' } }, ts.map((t) => h('li', {}, `${t.name}（${t.email}）`)))));
+        return h('div', { class: 'stack' }, code,
+          h('div', { class: 'small' }, '登録ページ：', h('a', { href: `${location.origin}/?teacher=1` }, `${location.origin}/?teacher=1`)),
+          h('button', { class: 'small', onclick: run(async () => {
+            if (!window.confirm('招待コードを作り直しますか？')) return;
+            code.textContent = await window.Store.teacherInvite(true);
+          }) }, '招待コードを作り直す'),
+          list);
+      })()) : null;
+
+    fill(view,
+      h('div', { class: 'card', style: { maxWidth: '640px' } },
+        h('h2', {}, 'このクラスの設定'),
+        h('div', { class: 'field' }, h('label', {}, 'クラス名'), h('div', { class: 'row' }, h('div', { class: 'grow' }, cls),
+          h('button', { onclick: run(async () => { await store.updateSettings({ className: cls.value }); toast('保存しました'); }) }, '保存'))),
+        h('div', { class: 'field' }, h('label', {}, '担当の先生'), coBox)),
+      adminCard,
+      h('div', { class: 'card', style: { maxWidth: '640px' } },
+        h('h2', {}, 'アカウント'),
+        h('div', { class: 'field' }, h('label', {}, '先生のパスワードを変える', h('div', { class: 'help' }, `ログイン用メールアドレス：${store.state.email}`)),
+          h('div', { class: 'stack' }, cur, next),
+          h('button', { style: { marginTop: '8px' }, onclick: run(async () => {
+            await window.Store.changePassword(cur.value, next.value);
+            toast('変更しました');
+            cur.value = '';
+            next.value = '';
+          }) }, '変更')),
+        h('div', { class: 'field' }, h('label', {}, 'ホーム画面・デスクトップに追加',
+          h('div', { class: 'help' }, '先生の画面もアプリのように開けます。生徒のスマホには、課題一覧に追加の案内が出ます')),
+        MB.install.standalone()
+          ? h('p', { class: 'muted small' }, '追加済みのアプリで開いています')
+          : h('button', { onclick: () => MB.install.prompt() }, '📲 追加する')),
+        h('button', { class: 'danger', onclick: MB.logout }, 'ログアウト')));
+  }
+
+  // ---------- クラスの切り替え・作成 ----------
+
+  const classKey = () => `mb-class:${who.uid}`;
+
+  function chooseClass(id) {
+    try { localStorage.setItem(classKey(), id); } catch { /* 無視 */ }
+    location.reload();
+  }
+
+  async function createClassFlow() {
+    const name = window.prompt('新しいクラスの名前（例：2年3組 数学Ⅱ）');
+    if (!name) return;
+    try {
+      const id = await window.Store.createClass(who.uid, name);
+      chooseClass(id);
+    } catch (e) {
+      toast(e.message);
+    }
+  }
+
+  function classPicker(classes, closable) {
+    const body = h('div', { class: 'stack' },
+      h('h2', {}, 'クラスを選ぶ'),
+      classes.length
+        ? h('div', { class: 'stack' }, classes.map((c) => h('button', {
+          class: `block${store && c.id === store.state.classId ? ' primary' : ''}`,
+          style: { justifyContent: 'space-between' },
+          onclick: () => chooseClass(c.id),
+        }, h('span', {}, c.name), h('span', { class: 'small' }, c.ownerUid === who.uid ? '' : '共同担当'))))
+        : h('p', { class: 'muted' }, 'まだクラスがありません。最初のクラスを作りましょう。'),
+      h('button', { class: classes.length ? '' : 'primary', onclick: createClassFlow }, '＋ 新しいクラスを作る'));
+    if (closable) {
+      const m = modal(h('div', {}, body, h('div', { class: 'row', style: { marginTop: '12px' } }, h('span', { class: 'grow' }), h('button', { onclick: () => m.close() }, '閉じる'))));
+    } else {
+      fill(view, h('div', { class: 'card', style: { maxWidth: '520px', margin: '24px auto' } }, body));
+    }
   }
 
   // ---------- タイマー ----------
@@ -981,13 +1070,34 @@
   // ---------- 起動 ----------
 
   (async () => {
-    const who = await window.Store.whoami();
+    who = await window.Store.whoami();
     if (who.role !== 'teacher') {
       location.href = who.role === 'student' ? '/student' : '/';
       return;
     }
     try { ui.tab = sessionStorage.getItem('mb-tab') || 'progress'; } catch { /* 無視 */ }
-    store = window.Store.teacherStore(who);
+    let classes = [];
+    try {
+      classes = await window.Store.teacherClasses(who.uid);
+    } catch (e) {
+      fill(view, h('div', { class: 'card error' }, `クラスを読み込めませんでした：${e.message}`));
+      return;
+    }
+    // 開くたびに読み直す（共同担当に加えられたクラスもすぐ出るように）
+    $('#class-btn').addEventListener('click', async () => {
+      try { classes = await window.Store.teacherClasses(who.uid); } catch { /* 前の一覧を使う */ }
+      classPicker(classes, true);
+    });
+    let saved = null;
+    try { saved = localStorage.getItem(classKey()); } catch { /* 無視 */ }
+    const current = classes.find((c) => c.id === saved) || (classes.length === 1 ? classes[0] : null);
+    if (!current) {
+      $('#timer-btn').classList.add('hidden');
+      classPicker(classes, false);
+      return;
+    }
+    $('#present-link').href = `/present?class=${encodeURIComponent(current.id)}`;
+    store = window.Store.teacherStore(who, current.id);
     startTimerButton();
     fill(view, h('p', { class: 'muted' }, '読み込み中…'));
     store.on((types) => {
@@ -995,7 +1105,8 @@
       if (!store.state.ready) return;
       // タイマーの数字は startTimerButton が進めるので、画面全体は描き直さない
       if (types.size === 1 && types.has('timer')) return;
-      $('#class-name').textContent = `${store.state.settings.className}（先生）`;
+      $('#class-name').textContent = store.state.settings.className;
+      $('#class-btn').textContent = 'クラス ▾';
       $('#live').classList.add('on');
       // 入力欄やダイアログを使っている間は描き直さない（入力が消えないように）
       const active = document.activeElement;

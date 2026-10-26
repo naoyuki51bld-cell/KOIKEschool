@@ -2,6 +2,8 @@
   const { h, fill, $, toast, rich, img, modal, compressImage, debounce, statusBadge } = MB;
   const view = $('#view');
   let store = null;
+  let who = null; // ログイン中の生徒
+  let classes = []; // 入っているクラス
   let current = null; // 開いている課題の画面の状態
 
   const SYMBOLS = ['√', '²', '³', '^', 'π', '±', '×', '÷', '≦', '≧', '≠', '∠', '△', '°', '⊥', '∥', '∞', 'θ', '∴', '∵', '⇒', '⇔', '∈', '∩', '∪', 'log', 'sin', 'cos', 'tan'];
@@ -198,7 +200,7 @@
         t.status === 'closed' ? h('span', { class: 'badge closed' }, '締め切り') : null),
       h('h1', {}, t.title),
       rich(t.body),
-      t.imageV ? img({ path: `tasks/${t.id}/files/image`, v: t.imageV }, { class: 'task-image', alt: '問題の図' }) : null,
+      t.imageV ? img(store.taskImage(t), { class: 'task-image', alt: '問題の図' }) : null,
       t.hint ? h('div', { class: 'hint' }, h('strong', {}, 'ヒント'), rich(t.hint)) : null);
 
     current.els.status = h('div');
@@ -541,7 +543,47 @@
 
   // ---------- メニュー ----------
 
+  // ---------- クラス ----------
+
+  const classKey = () => `mb-class-s:${who.sid}`;
+
+  function chooseClass(id) {
+    try { localStorage.setItem(classKey(), id); } catch { /* 無視 */ }
+    location.hash = '';
+    location.reload();
+  }
+
+  // 参加コードで別のクラスに入る
+  function joinForm(onDone) {
+    const code = h('input', { type: 'text', placeholder: '先生が見せている6文字', autocapitalize: 'characters', autocomplete: 'off' });
+    const number = h('input', { type: 'number', inputmode: 'numeric', min: 1, max: 4000, placeholder: '出席番号（任意）' });
+    const error = h('div', { class: 'error' });
+    return h('div', { class: 'stack' },
+      h('div', { class: 'field' }, h('label', {}, '参加コード'), code),
+      h('div', { class: 'field' }, h('label', {}, '出席番号', h('div', { class: 'help' }, 'このクラスの先生だけが見ます')), number),
+      error,
+      h('button', { class: 'primary block', onclick: async (e) => {
+        error.textContent = '';
+        e.currentTarget.disabled = true;
+        try {
+          const id = await window.Store.joinClass(who, { joinCode: code.value, number: number.value });
+          if (onDone) onDone();
+          chooseClass(id);
+        } catch (err) {
+          error.textContent = err.message;
+          e.target.disabled = false;
+        }
+      } }, 'クラスに参加する'));
+  }
+
   $('#menu-btn').addEventListener('click', () => {
+    if (!store) {
+      const m0 = modal(h('div', { class: 'stack' },
+        h('h2', {}, 'メニュー'),
+        h('button', { class: 'danger', onclick: MB.logout }, 'ログアウト'),
+        h('button', { onclick: () => m0.close() }, '閉じる')));
+      return;
+    }
     const me = store.state.me;
     const nameInput = h('input', { type: 'text', value: me.name, maxlength: 20 });
     const cur = h('input', { type: 'password', autocomplete: 'current-password', placeholder: '今のパスワード' });
@@ -570,6 +612,13 @@
             next.value = '';
           } catch (e) { error.textContent = e.message; }
         } }, '変更')),
+      h('div', { class: 'field' }, h('label', {}, 'クラス'),
+        h('div', { class: 'stack' },
+          classes.map((c) => h('button', {
+            class: `block${c.id === store.state.classId ? ' primary' : ''}`,
+            onclick: () => (c.id === store.state.classId ? m.close() : chooseClass(c.id)),
+          }, c.id === store.state.classId ? `${c.name}（いまのクラス）` : `${c.name} に切り替える`)),
+          h('details', {}, h('summary', { style: { cursor: 'pointer', fontWeight: 600 } }, '＋ 別のクラスに参加する'), joinForm(() => m.close())))),
       MB.install.standalone() ? null : h('button', { onclick: () => { m.close(); MB.install.prompt(); } }, '📲 ホーム画面に追加'),
       error,
       h('div', { class: 'row between' },
@@ -625,12 +674,28 @@
   }
 
   (async () => {
-    const who = await window.Store.whoami();
+    who = await window.Store.whoami();
     if (who.role !== 'student') {
       location.href = who.role === 'teacher' ? '/teacher' : '/';
       return;
     }
-    store = window.Store.studentStore(who);
+    try {
+      classes = await window.Store.studentClasses(who.classIds);
+    } catch (e) {
+      fill(view, h('div', { class: 'card error' }, `クラスを読み込めませんでした：${e.message}`));
+      return;
+    }
+    if (!classes.length) {
+      fill(view, h('div', { class: 'card' }, h('h2', {}, 'クラスに参加する'),
+        h('p', { class: 'muted small' }, '今は、どのクラスにも入っていません。先生から参加コードを聞いて入力してください。'), joinForm()));
+      return;
+    }
+    let saved = null;
+    try { saved = localStorage.getItem(classKey()); } catch { /* 無視 */ }
+    const current = classes.find((c) => c.id === saved) || classes[0];
+    store = window.Store.studentStore(who, current.id);
+    // 2つ以上のクラスに入っているときは、上にクラス名と切り替えボタンを出す
+    if (classes.length > 1) $('#class-name').after(h('button', { class: 'small', onclick: () => $('#menu-btn').click() }, '切替'));
     startTimerBar();
     fill(view, h('p', { class: 'muted' }, '読み込み中…'));
     let started = false;
