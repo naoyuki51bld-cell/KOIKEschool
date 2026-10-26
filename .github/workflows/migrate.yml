@@ -1,0 +1,48 @@
+# 「1クラスだけ」の時代のデータを、複数クラスの形にコピーする（元のデータは消さない）。
+# 動かす前に必ずバックアップを取る。check は数えるだけ、run で実際にコピーする。
+name: データを複数クラスの形にコピー
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'check（数えるだけ）または run（コピーする）'
+        required: true
+        default: check
+        type: choice
+        options: [check, run]
+
+jobs:
+  migrate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: バックアップ
+        env:
+          FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+        run: |
+          printf '%s' "$FIREBASE_SERVICE_ACCOUNT" > "$RUNNER_TEMP/sa.json"
+          export GOOGLE_APPLICATION_CREDENTIALS="$RUNNER_TEMP/sa.json"
+          name="backup-before-migrate-$(date -u +%Y%m%d-%H%M%S).enc"
+          echo "BACKUP_NAME=$name" >> "$GITHUB_ENV"
+          node --no-warnings scripts/backup.js save "$RUNNER_TEMP/$name"
+          node --no-warnings scripts/backup.js check "$RUNNER_TEMP/$name"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.BACKUP_NAME }}
+          path: ${{ runner.temp }}/${{ env.BACKUP_NAME }}
+          retention-days: 90
+          if-no-files-found: error
+      - name: コピー（${{ inputs.mode }}）
+        run: |
+          export GOOGLE_APPLICATION_CREDENTIALS="$RUNNER_TEMP/sa.json"
+          node --no-warnings scripts/migrate.js "${{ inputs.mode }}" 2>&1 | tee "$RUNNER_TEMP/migrate.txt"
+          echo "::notice::$(tail -1 "$RUNNER_TEMP/migrate.txt")"
+      - name: 片付け
+        if: always()
+        run: rm -f "$RUNNER_TEMP/sa.json"
