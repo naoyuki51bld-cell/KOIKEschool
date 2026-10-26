@@ -1,0 +1,36 @@
+# Firestore の全データを暗号化して保存する（データは何も書き換えない）。
+# 「Actions」タブの「データのバックアップ」→「Run workflow」で動かす。保存したものは 90 日残る。
+name: データのバックアップ
+
+on:
+  workflow_dispatch:
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: バックアップ
+        env:
+          FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+        run: |
+          printf '%s' "$FIREBASE_SERVICE_ACCOUNT" > "$RUNNER_TEMP/sa.json"
+          export GOOGLE_APPLICATION_CREDENTIALS="$RUNNER_TEMP/sa.json"
+          name="backup-$(date -u +%Y%m%d-%H%M%S).enc"
+          echo "BACKUP_NAME=$name" >> "$GITHUB_ENV"
+          node --no-warnings scripts/backup.js save "$RUNNER_TEMP/$name" 2>&1 | tee "$RUNNER_TEMP/summary.txt"
+          # 暗号化したものを開き直して確かめる
+          node --no-warnings scripts/backup.js check "$RUNNER_TEMP/$name"
+          rm -f "$RUNNER_TEMP/sa.json"
+          echo "::notice::$(head -1 "$RUNNER_TEMP/summary.txt")"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.BACKUP_NAME }}
+          path: ${{ runner.temp }}/${{ env.BACKUP_NAME }}
+          retention-days: 90
+          if-no-files-found: error
