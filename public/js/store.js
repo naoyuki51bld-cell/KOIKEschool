@@ -973,6 +973,25 @@
       if (groupId !== undefined) patch.groupId = groupId || null;
       batch.update(ref(`${B}/members/${sid}`), patch);
       await batch.commit();
+      // 名前は全クラス共通なので、ほかのクラスの名簿の名前も合わせる（ほかのクラスで失敗しても、このクラスの変更は残す）
+      if (patch.name) {
+        const g = await F.getDoc(ref(`students/${sid}`)).catch(() => null);
+        const others = ((g && g.exists() && g.data().classIds) || []).filter((c) => c !== classId);
+        await Promise.all(others.map((c) => F.updateDoc(ref(`classes/${c}/members/${sid}`), { name: patch.name }).catch(() => {})));
+      }
+    });
+
+    // 出席番号をまとめて変える。entries: [{ studentId, number }]
+    const updateNumbers = wrap(async (entries) => {
+      const changes = entries
+        .map(({ studentId, number }) => ({ studentId, number: parseNumber(number) }))
+        .filter(({ studentId, number }) => state.students.has(studentId) && state.students.get(studentId).number !== number);
+      for (let i = 0; i < changes.length; i += 400) {
+        const batch = F.writeBatch(db);
+        changes.slice(i, i + 400).forEach(({ studentId, number }) => batch.update(ref(`${B}/members/${studentId}`), { number }));
+        await batch.commit();
+      }
+      return changes.length;
     });
 
     // 提出と、そのファイル・匿名コピーを消す
@@ -1268,7 +1287,7 @@
 
     return {
       state, on: ev.on, students, groups, tasks, ownerName, submissionsOf, taskView, taskImage, setTimer, watchLikes, setCoTeacher,
-      quizzes, scoresOf, createQuiz, updateQuiz, deleteQuiz, saveScores,
+      quizzes, scoresOf, createQuiz, updateQuiz, deleteQuiz, saveScores, updateNumbers,
       updateSettings, addStudent, resetStudentPassword, updateStudent, deleteStudent,
       addGroup, renameGroup, deleteGroup, autoGroups,
       createTask, updateTask, rejudge, duplicateTask, reorderTasks, deleteTask,

@@ -209,7 +209,11 @@ service cloud.firestore {
         allow update: if isClassTeacher(c)
           || (hasAccount() && mySid() == sid
             && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['name'])
-            && str(request.resource.data.name, 20) && request.resource.data.name.size() > 0);
+            && str(request.resource.data.name, 20) && request.resource.data.name.size() > 0)
+          // ほかのクラスの先生が生徒の名前を変えたとき、このクラスの名簿の名前も合わせる（名前は全クラス共通）
+          || (isTeacher()
+            && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['name'])
+            && request.resource.data.name == get(/databases/$(database)/documents/students/$(sid)).data.name);
         allow delete: if isClassTeacher(c);
       }
 

@@ -96,6 +96,8 @@
       back.remove();
       document.removeEventListener('keydown', onKey);
       if (onClose) onClose();
+      // ダイアログを開いている間に止めていた描き直しを、閉じたときにする
+      document.dispatchEvent(new Event('mb-modal-closed'));
     };
     const onKey = (e) => { if (e.key === 'Escape') close(); };
     back.addEventListener('mousedown', (e) => { if (e.target === back) close(); });

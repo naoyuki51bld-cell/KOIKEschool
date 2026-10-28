@@ -298,3 +298,17 @@ test('パスワード再設定後は古いログインが使えない', async ()
   await assertSucceeds(deleteDoc(doc(as('admin'), 'accounts/uid2')));
   await assertFails(getDoc(doc(as('uid2'), 'classes/A/subs/group__g_g1')));
 });
+
+test('先生が名前を変えたら、ほかのクラスの名簿の名前だけ合わせられる', async () => {
+  const b = as('tB');
+  // B の先生が s3（A と B に在籍）の名前を変える
+  await assertSucceeds(updateDoc(doc(b, 'students/s3'), { name: 'さぶ' }));
+  await assertSucceeds(updateDoc(doc(b, 'classes/B/members/s3'), { name: 'さぶ', number: 7 }));
+  // A の名簿は、名前をアカウントの名前に合わせることだけできる
+  await assertSucceeds(updateDoc(doc(b, 'classes/A/members/s3'), { name: 'さぶ' }));
+  await assertFails(updateDoc(doc(b, 'classes/A/members/s3'), { name: 'ちがう名前' }));
+  await assertFails(updateDoc(doc(b, 'classes/A/members/s3'), { number: 99 }));
+  await assertFails(updateDoc(doc(b, 'classes/A/members/s3'), { groupId: 'g1' }));
+  // 生徒はこの方法で他人の名簿を変えられない
+  await assertFails(updateDoc(doc(as('uid1'), 'classes/A/members/s3'), { name: 'さぶ' }));
+});

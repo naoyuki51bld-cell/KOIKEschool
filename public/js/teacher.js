@@ -10,6 +10,7 @@
     answersTaskId: null,
     answersFilter: 'all',
     taskOrder: (() => { try { return localStorage.getItem('mb-task-order') || 'new'; } catch { return 'new'; } })(),
+    numberDraft: null, // 出席番号をまとめて編集しているとき：生徒ID → 入力中の文字
     quizId: null, // 得点入力中の小テスト
     scoreDraft: {}, // 保存前の得点（生徒ID → 入力中の文字）
     answersSort: 'time',
@@ -832,22 +833,57 @@
       h('h2', {}, title), h('p', {}, `${name} さんのパスワード：`), h('div', { class: 'code-big' }, password),
       h('p', { class: 'muted small' }, 'ログイン後、生徒が自分でメニューから変更できます。')));
 
+    // 出席番号をまとめて書き換えるときは、番号の欄が入力欄になる
+    const numberEdit = !!ui.numberDraft;
+    const numberInputs = [];
+    const numberCell = (st, i) => {
+      if (!numberEdit) return st.number ?? '—';
+      const input = h('input', {
+        type: 'text', inputmode: 'numeric', value: st.id in ui.numberDraft ? ui.numberDraft[st.id] : (st.number ?? ''),
+        placeholder: '—', style: { width: '90px', padding: '6px 8px' },
+        oninput: (e) => { ui.numberDraft[st.id] = e.target.value; },
+        onkeydown: (e) => {
+          if (e.key === 'Enter' || e.key === 'ArrowDown') { e.preventDefault(); numberInputs[i + 1]?.focus(); }
+          if (e.key === 'ArrowUp') { e.preventDefault(); numberInputs[i - 1]?.focus(); }
+        },
+      });
+      numberInputs.push(input);
+      return input;
+    };
+    const saveNumbers = run(async (e) => {
+      const entries = students.map((st) => ({ studentId: st.id, number: st.id in ui.numberDraft ? ui.numberDraft[st.id] : st.number }));
+      // 同じ番号が2人いたら知らせる（保存はしない）
+      const seen = new Map();
+      for (const x of entries) {
+        const n = String(x.number ?? '').normalize('NFKC').trim();
+        if (!n) continue;
+        if (seen.has(n)) return toast(`出席番号 ${n} が2人います（${seen.get(n)}・${studentName(x.studentId)}）`);
+        seen.set(n, studentName(x.studentId));
+      }
+      e.target.disabled = true;
+      const changed = await store.updateNumbers(entries);
+      ui.numberDraft = null;
+      toast(changed ? `出席番号を保存しました（${changed}人）` : '変更はありません');
+      render();
+    });
+    const studentName = (sid) => store.state.students.get(sid)?.name || '';
+
     const table = h('div', { class: 'card', style: { overflowX: 'auto' } },
-      h('h2', {}, `生徒（${students.length}人）`),
-      students.length ? h('table', { class: 'list' },
+      h('div', { class: 'row between' },
+        h('h2', { style: { margin: 0 } }, `生徒（${students.length}人）`),
+        students.length ? h('div', { class: 'row' }, numberEdit
+          ? [h('button', { class: 'small primary', onclick: saveNumbers }, '出席番号を保存'),
+            h('button', { class: 'small', onclick: () => { ui.numberDraft = null; render(); } }, 'やめる')]
+          : h('button', { class: 'small', onclick: () => { ui.numberDraft = {}; render(); } }, '出席番号をまとめて編集')) : null),
+      numberEdit ? h('p', { class: 'muted small' }, '番号を書き換えて「出席番号を保存」を押してください。Enter で次の人に進みます。空欄にすると番号なしになります。') : null,
+      students.length ? h('table', { class: 'list', style: { marginTop: '8px' } },
         h('thead', {}, h('tr', {}, h('th', {}, '番号'), h('th', {}, '表示名'), h('th', {}, 'グループ'), h('th', {}, ''))),
-        h('tbody', {}, students.map((st) => h('tr', {},
-          h('td', {}, st.number ?? '—'),
+        h('tbody', {}, students.map((st, i) => h('tr', {},
+          h('td', {}, numberCell(st, i)),
           h('td', {}, st.name),
           h('td', {}, groupSelect(st)),
           h('td', { style: { textAlign: 'right', whiteSpace: 'nowrap' } },
-            h('button', { class: 'small', onclick: run(async () => {
-              const name = window.prompt('表示名', st.name);
-              if (name === null) return;
-              const number = window.prompt('出席番号（空欄可）', st.number ?? '');
-              if (number === null) return;
-              await store.updateStudent(st.id, { name, number: number || null });
-            }) }, '編集'),
+            h('button', { class: 'small', onclick: () => editStudent(st) }, '編集'),
             h('button', { class: 'small', onclick: run(async (e) => {
               if (!window.confirm(`${st.name} のパスワードを再設定しますか？`)) return;
               e.target.disabled = true;
@@ -860,6 +896,38 @@
             }) }, 'クラスから外す')))))) : h('p', { class: 'muted' }, 'まだ誰も登録していません。'));
 
     fill(view, join, h('div', { style: { height: '12px' } }), groupCard, h('div', { style: { height: '12px' } }), table);
+
+    // 1人の名前と出席番号を変える
+    function editStudent(st) {
+      const name = h('input', { type: 'text', value: st.name, maxlength: 20 });
+      const number = h('input', { type: 'text', inputmode: 'numeric', value: st.number ?? '', placeholder: '空欄なら番号なし' });
+      const error = h('div', { class: 'error' });
+      const m = modal(h('div', { class: 'stack' },
+        h('h2', {}, '生徒の情報を変える'),
+        h('div', { class: 'field' }, h('label', {}, '表示名',
+          h('div', { class: 'help' }, '生徒がログインに使う名前も変わります。ほかのクラスにも入っている生徒は、そちらの名前も変わります。')), name),
+        h('div', { class: 'field' }, h('label', {}, '出席番号', h('div', { class: 'help' }, '1〜4000。このクラスだけの番号です')), number),
+        error,
+        h('div', { class: 'row' },
+          h('span', { class: 'grow' }),
+          h('button', { onclick: () => m.close() }, 'キャンセル'),
+          h('button', { class: 'primary', onclick: async (e) => {
+            error.textContent = '';
+            const n = String(number.value).normalize('NFKC').trim();
+            const dup = n && store.students().find((x) => x.id !== st.id && String(x.number ?? '') === n);
+            if (dup && !window.confirm(`出席番号 ${n} は ${dup.name} さんも使っています。このまま保存しますか？`)) return;
+            e.currentTarget.disabled = true;
+            try {
+              await store.updateStudent(st.id, { name: name.value, number: n || null });
+              m.close();
+              toast('保存しました');
+            } catch (err) {
+              error.textContent = err.message;
+              e.target.disabled = false;
+            }
+          } }, '保存'))));
+      name.focus();
+    }
 
     function addStudent() {
       const name = h('input', { type: 'text', placeholder: '表示名' });
@@ -1111,8 +1179,18 @@
       // 入力欄やダイアログを使っている間は描き直さない（入力が消えないように）
       const active = document.activeElement;
       const typing = active && view.contains(active) && ['INPUT', 'TEXTAREA', 'SELECT'].includes(active.tagName);
-      if ($('.modal-back') || typing) renderTabs();
-      else render();
+      if ($('.modal-back') || typing) {
+        renderTabs();
+        pendingRender = true;
+      } else {
+        render();
+      }
+    });
+    let pendingRender = false;
+    document.addEventListener('mb-modal-closed', () => {
+      if (!pendingRender || $('.modal-back')) return;
+      pendingRender = false;
+      render();
     });
     window.addEventListener('offline', () => $('#live').classList.remove('on'));
     window.addEventListener('online', () => $('#live').classList.add('on'));
