@@ -27,6 +27,37 @@ jobs:
       - run: npm ci
       - run: npm run build
       - run: node --no-warnings --test test/judge.test.js
+      # 公開の前に、今のデータを暗号化して保存する
+      - name: バックアップ
+        env:
+          FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+        run: |
+          printf '%s' "$FIREBASE_SERVICE_ACCOUNT" > "$RUNNER_TEMP/sa.json"
+          export GOOGLE_APPLICATION_CREDENTIALS="$RUNNER_TEMP/sa.json"
+          name="backup-before-deploy-$(date -u +%Y%m%d-%H%M%S).enc"
+          echo "BACKUP_NAME=$name" >> "$GITHUB_ENV"
+          node --no-warnings scripts/backup.js save "$RUNNER_TEMP/$name"
+          node --no-warnings scripts/backup.js check "$RUNNER_TEMP/$name"
+          rm -f "$RUNNER_TEMP/sa.json"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.BACKUP_NAME }}
+          path: ${{ runner.temp }}/${{ env.BACKUP_NAME }}
+          retention-days: 90
+          if-no-files-found: error
+      # 複数クラスの形にまだ移していなければ、ここで移す（一度移したあとは何もしない）。
+      # 失敗したら公開しないので、今の版のまま使える
+      - name: データの移し替え（まだなら）
+        env:
+          FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+        run: |
+          printf '%s' "$FIREBASE_SERVICE_ACCOUNT" > "$RUNNER_TEMP/sa.json"
+          export GOOGLE_APPLICATION_CREDENTIALS="$RUNNER_TEMP/sa.json"
+          node --no-warnings scripts/migrate.js run 2>&1 | tee "$RUNNER_TEMP/migrate.txt"
+          code=${PIPESTATUS[0]}
+          rm -f "$RUNNER_TEMP/sa.json"
+          echo "::notice::$(tail -1 "$RUNNER_TEMP/migrate.txt")"
+          exit "$code"
       - name: 公開
         env:
           FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
