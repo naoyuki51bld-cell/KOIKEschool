@@ -124,7 +124,7 @@
         join,
         task
           ? h('div', { class: 'card ptask' }, h('h1', {}, task.title), rich(task.body),
-            task.imageV ? img({ path: `tasks/${task.id}/files/image`, v: task.imageV }, { class: 'task-image', style: { maxHeight: '30vh' } }) : null,
+            task.imageV ? img(store.taskImage(task), { class: 'task-image', style: { maxHeight: '30vh' } }) : null,
             task.hint ? h('div', { class: 'hint' }, h('strong', {}, 'ヒント'), rich(task.hint)) : null)
           : (join ? null : h('div', { class: 'card muted' }, '先生の画面の「回答」タブで、提示する回答を選ぶか「全員の回答」を押すと、ここに表示されます。')),
         task ? h('div', { class: 'muted', style: { fontSize: '.8em' } },
@@ -169,7 +169,19 @@
         location.href = '/';
         return;
       }
-      store = window.Store.teacherStore(who);
+      // どのクラスの提示画面か（先生の画面のリンクに付いている）
+      let classId = new URLSearchParams(location.search).get('class')
+        || (() => { try { return localStorage.getItem(`mb-class:${who.uid}`); } catch { return null; } })();
+      if (!classId) {
+        // 担当のクラスが1つだけなら、それを出す
+        const classes = await window.Store.teacherClasses(who.uid).catch(() => []);
+        if (classes.length === 1) classId = classes[0].id;
+      }
+      if (!classId) {
+        fill(view, h('div', { class: 'card muted' }, '先生の画面の「提示画面を開く」から開いてください。'));
+        return;
+      }
+      store = window.Store.teacherStore(who, classId);
       startTimer();
       store.on((types) => {
         if (!store.state.ready) return;

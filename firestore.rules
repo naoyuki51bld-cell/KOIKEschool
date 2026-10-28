@@ -3,23 +3,25 @@ rules_version = '2';
 // 数学ボードのアクセス規則。サーバーのプログラムがないので、
 // 「誰が何を読めて、何を書き換えられるか」はすべてここで決める。
 //
-// - config/main の teacherUid の人が先生。それ以外は生徒。
-// - 生徒は accounts/{uid} → students/{studentId} で本人を確かめる。
+// - config/main の teacherUid の人が管理者。teachers/{uid} がある人が先生。
+// - クラスの中身は classes/{c}/… にあり、読み書きできるのはそのクラスの担当の先生（teacherUids）と、名簿（members）に入っている生徒だけ。
+// - 生徒は accounts/{uid} → studentId で本人を確かめる。
 // - 生徒同士の回答（peers）には名前・班・提出時刻を入れない。
+// - 複数クラスにする前のデータ（tasks・quizzes など一番上にあるもの）は、管理者が読めるだけで誰も書き換えられない。
 
 service cloud.firestore {
   match /databases/{database}/documents {
 
-    function cfg(name) {
-      return get(/databases/$(database)/documents/config/$(name)).data;
-    }
     function signedIn() {
       return request.auth != null;
     }
-    function isTeacher() {
+    function isAdmin() {
       return signedIn()
         && exists(/databases/$(database)/documents/config/main)
-        && cfg('main').teacherUid == request.auth.uid;
+        && get(/databases/$(database)/documents/config/main).data.teacherUid == request.auth.uid;
+    }
+    function isTeacher() {
+      return signedIn() && (exists(/databases/$(database)/documents/teachers/$(request.auth.uid)) || isAdmin());
     }
     function hasAccount() {
       return signedIn() && exists(/databases/$(database)/documents/accounts/$(request.auth.uid));
@@ -27,64 +29,98 @@ service cloud.firestore {
     function mySid() {
       return get(/databases/$(database)/documents/accounts/$(request.auth.uid)).data.studentId;
     }
-    function me() {
-      return get(/databases/$(database)/documents/students/$(mySid())).data;
+
+    // ----- クラス -----
+    function cls(c) {
+      return get(/databases/$(database)/documents/classes/$(c)).data;
     }
-    function myGroupKey() {
-      return me().groupId == null ? '' : 'g_' + me().groupId;
+    function isClassTeacher(c) {
+      return signedIn() && exists(/databases/$(database)/documents/classes/$(c))
+        && request.auth.uid in cls(c).teacherUids;
     }
-    function isMyKey(key) {
-      return key == 'u_' + mySid() || (me().groupId != null && key == myGroupKey());
+    function memberPath(c) {
+      return /databases/$(database)/documents/classes/$(c)/members/$(mySid());
     }
-    function task(t) {
-      return get(/databases/$(database)/documents/tasks/$(t)).data;
+    function isMember(c) {
+      return hasAccount() && exists(memberPath(c));
     }
-    function published(t) {
-      return task(t).status in ['open', 'closed'];
+    function member(c) {
+      return get(memberPath(c)).data;
+    }
+    function myGroupKey(c) {
+      return member(c).groupId == null ? '' : 'g_' + member(c).groupId;
+    }
+    function isMyKey(c, key) {
+      return key == 'u_' + mySid() || (member(c).groupId != null && key == myGroupKey(c));
+    }
+    function task(c, t) {
+      return get(/databases/$(database)/documents/classes/$(c)/tasks/$(t)).data;
+    }
+    function published(c, t) {
+      return task(c, t).status in ['open', 'closed'];
     }
     // この課題で、自分（またはグループ）が提出するときの名前
-    function ownerKeyFor(t) {
-      return task(t).mode == 'group' ? myGroupKey() : 'u_' + mySid();
+    function ownerKeyFor(c, t) {
+      return task(c, t).mode == 'group' ? myGroupKey(c) : 'u_' + mySid();
     }
-    function mySubPath(t) {
-      return /databases/$(database)/documents/tasks/$(t)/subs/$(ownerKeyFor(t));
+    function mySubPath(c, t) {
+      return /databases/$(database)/documents/classes/$(c)/subs/$(t + '__' + ownerKeyFor(c, t));
     }
-    function canSeePeers(t) {
-      return published(t)
-        && (task(t).peerView == 'on'
-          || (task(t).peerView == 'after_submit' && ownerKeyFor(t) != '' && exists(mySubPath(t))));
+    function canSeePeers(c, t) {
+      return published(c, t)
+        && (task(c, t).peerView == 'on'
+          || (task(c, t).peerView == 'after_submit' && ownerKeyFor(c, t) != '' && exists(mySubPath(c, t))));
+    }
+    function ownsPeer(c, t, pid) {
+      return task(c, t).status == 'open' && ownerKeyFor(c, t) != ''
+        && getAfter(mySubPath(c, t)).data.peerId == pid;
     }
     function str(v, max) {
       return v is string && v.size() <= max;
     }
     function optInt(v) {
-      return v == null || v is int;
+      return v == null || (v is int && v >= 1 && v <= 4000);
     }
 
-    // ---------- 設定 ----------
+    // ---------- 設定・先生 ----------
 
-    // クラス名・登録受付中か・先生の uid。ログイン前の画面でも読む
     match /config/main {
       allow get: if true;
       allow create: if signedIn()
         && request.resource.data.teacherUid == request.auth.uid
         && request.resource.data.keys().hasOnly(['teacherUid', 'className', 'registrationOpen']);
-      allow update: if isTeacher()
-        && request.resource.data.teacherUid == resource.data.teacherUid
-        && request.resource.data.keys().hasOnly(['teacherUid', 'className', 'registrationOpen']);
+      allow update: if isAdmin()
+        && request.resource.data.teacherUid == resource.data.teacherUid;
     }
-
-    // 参加コード・正解・ヒント・提示画面の状態など、先生だけのもの
+    // 先生の招待コード（管理者だけ）
+    match /config/teacherInvite {
+      allow read, write: if isAdmin();
+    }
+    // それ以外の config は、複数クラスにする前のもの
     match /config/{name} {
-      allow read, write: if name != 'main' && isTeacher();
+      allow read: if isAdmin() && !(name in ['main', 'teacherInvite']);
     }
 
-    // ---------- ログイン名 ----------
+    match /teachers/{uid} {
+      allow read: if isTeacher();
+      allow create: if isAdmin()
+        || (signedIn() && request.auth.uid == uid
+          && request.resource.data.keys().hasOnly(['name', 'email', 'inviteCode', 'createdAt'])
+          && request.resource.data.email == request.auth.token.email
+          && str(request.resource.data.name, 30) && request.resource.data.name.size() > 0
+          && exists(/databases/$(database)/documents/config/teacherInvite)
+          && request.resource.data.inviteCode == get(/databases/$(database)/documents/config/teacherInvite).data.code);
+      allow update: if isAdmin()
+        || (signedIn() && request.auth.uid == uid && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['name']));
+      allow delete: if isAdmin();
+    }
+
+    // ---------- 生徒のアカウント（全クラス共通） ----------
 
     // 表示名 → ログイン用のメールアドレス。名前を知っていれば引けるが、一覧はできない
     match /names/{key} {
       allow get: if true;
-      allow list: if isTeacher();
+      allow list: if isAdmin();
       allow create: if isTeacher()
         || (signedIn()
           && request.resource.data.keys().hasOnly(['email', 'studentId'])
@@ -97,7 +133,7 @@ service cloud.firestore {
 
     match /accounts/{uid} {
       allow get: if (signedIn() && request.auth.uid == uid) || isTeacher();
-      allow list: if isTeacher();
+      allow list: if isAdmin();
       allow create: if isTeacher()
         || (signedIn() && request.auth.uid == uid
           && request.resource.data.keys().hasOnly(['studentId'])
@@ -105,113 +141,182 @@ service cloud.firestore {
       allow delete: if isTeacher();
     }
 
-    // ---------- 生徒・グループ ----------
-
     match /students/{sid} {
       allow get: if isTeacher() || (hasAccount() && mySid() == sid);
-      allow list: if isTeacher();
+      allow list: if isAdmin();
+      // はじめての登録は、参加コードでどこかのクラスの名簿に入るときだけ
       allow create: if isTeacher()
         || (signedIn()
-          && cfg('main').registrationOpen == true
-          && request.resource.data.keys().hasOnly(['name', 'number', 'uid', 'joinCode', 'groupId', 'createdAt'])
+          && request.resource.data.keys().hasOnly(['name', 'uid', 'classIds', 'createdAt'])
           && request.resource.data.uid == request.auth.uid
-          && request.resource.data.joinCode == cfg('secret').joinCode
-          && request.resource.data.groupId == null
           && str(request.resource.data.name, 20) && request.resource.data.name.size() > 0
-          && optInt(request.resource.data.number));
+          && request.resource.data.classIds.size() == 1
+          && existsAfter(/databases/$(database)/documents/classes/$(request.resource.data.classIds[0])/members/$(sid)));
       allow update: if isTeacher()
         || (hasAccount() && mySid() == sid
-          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['name'])
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['name', 'classIds'])
           && str(request.resource.data.name, 20) && request.resource.data.name.size() > 0);
-      allow delete: if isTeacher();
+      allow delete: if isAdmin();
     }
 
-    match /groups/{gid} {
-      allow get: if isTeacher() || (hasAccount() && me().groupId == gid);
-      allow list, write: if isTeacher();
+    // 参加コード → クラス。コードを知っていれば引けるが、一覧はできない
+    match /joinCodes/{code} {
+      allow get: if true;
+      allow create: if isClassTeacher(request.resource.data.classId);
+      allow delete: if isClassTeacher(resource.data.classId);
     }
 
-    // ---------- 課題 ----------
+    // ---------- クラス ----------
 
-    match /tasks/{t} {
-      allow get: if isTeacher() || (signedIn() && resource.data.status in ['open', 'closed']);
-      allow list: if isTeacher() || (signedIn() && resource.data.status in ['open', 'closed']);
-      allow write: if isTeacher();
+    match /classes/{c} {
+      allow get: if isClassTeacher(c) || isMember(c);
+      allow list: if isAdmin() || (signedIn() && request.auth.uid in resource.data.teacherUids);
+      allow create: if isTeacher()
+        && request.resource.data.ownerUid == request.auth.uid
+        && request.resource.data.teacherUids == [request.auth.uid]
+        && request.resource.data.keys().hasOnly(['name', 'ownerUid', 'teacherUids', 'registrationOpen', 'createdAt']);
+      // 担当の先生は名前と登録受付を変えられる。担当の先生の入れ替えは、クラスを作った先生だけ
+      allow update: if isClassTeacher(c)
+        && request.resource.data.ownerUid == resource.data.ownerUid
+        && request.resource.data.keys().hasOnly(['name', 'ownerUid', 'teacherUids', 'registrationOpen', 'createdAt'])
+        && (!request.resource.data.diff(resource.data).affectedKeys().hasAny(['teacherUids'])
+          || (resource.data.ownerUid == request.auth.uid && resource.data.ownerUid in request.resource.data.teacherUids));
 
-      // 問題の画像
-      match /files/{f} {
-        allow read: if isTeacher() || (signedIn() && published(t));
-        allow write: if isTeacher();
+      // 参加コード・正解・提示画面など、先生だけのもの
+      match /private/{d} {
+        allow read, write: if isClassTeacher(c);
       }
 
-      // 提出。キーは u_{生徒} か g_{グループ}
-      match /subs/{key} {
-        allow read: if isTeacher() || (hasAccount() && isMyKey(key));
-        allow create, update: if isTeacher() || (hasAccount() && validStudentSubmit(t, key));
-        allow delete: if isTeacher();
+      match /live/{d} {
+        allow read: if isClassTeacher(c) || isMember(c);
+        allow write: if isClassTeacher(c);
+      }
+
+      // 名簿（出席番号・班はクラスごと）
+      match /members/{sid} {
+        allow get: if isClassTeacher(c) || (hasAccount() && mySid() == sid);
+        allow list: if isClassTeacher(c);
+        // 生徒は参加コードを持っているときだけ自分で入れる
+        allow create: if isClassTeacher(c)
+          || (signedIn()
+            && getAfter(/databases/$(database)/documents/accounts/$(request.auth.uid)).data.studentId == sid
+            && cls(c).registrationOpen == true
+            && request.resource.data.keys().hasOnly(['name', 'number', 'groupId', 'joinCode', 'joinedAt'])
+            && request.resource.data.joinCode == get(/databases/$(database)/documents/classes/$(c)/private/join).data.code
+            && request.resource.data.groupId == null
+            && str(request.resource.data.name, 20)
+            && optInt(request.resource.data.number));
+        allow update: if isClassTeacher(c)
+          || (hasAccount() && mySid() == sid
+            && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['name'])
+            && str(request.resource.data.name, 20) && request.resource.data.name.size() > 0)
+          // ほかのクラスの先生が生徒の名前を変えたとき、このクラスの名簿の名前も合わせる（名前は全クラス共通）
+          || (isTeacher()
+            && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['name'])
+            && request.resource.data.name == get(/databases/$(database)/documents/students/$(sid)).data.name);
+        allow delete: if isClassTeacher(c);
+      }
+
+      match /groups/{g} {
+        allow get: if isClassTeacher(c) || (isMember(c) && member(c).groupId == g);
+        allow list, write: if isClassTeacher(c);
+      }
+
+      match /tasks/{t} {
+        allow read: if isClassTeacher(c) || (isMember(c) && resource.data.status in ['open', 'closed']);
+        allow write: if isClassTeacher(c);
+
+        // 問題の画像
+        match /files/{f} {
+          allow read: if isClassTeacher(c) || (isMember(c) && published(c, t));
+          allow write: if isClassTeacher(c);
+        }
+
+        // みんなの考え（匿名のコピー）
+        match /peers/{pid} {
+          allow read: if isClassTeacher(c) || (isMember(c) && canSeePeers(c, t));
+          allow create, update: if isMember(c) && ownsPeer(c, t, pid)
+            && request.resource.data.keys().hasOnly(['shortAnswer', 'text', 'drawingV', 'photoV']);
+          allow delete: if isClassTeacher(c);
+
+          match /files/{f} {
+            allow read: if isClassTeacher(c) || (isMember(c) && canSeePeers(c, t));
+            allow create, update: if isMember(c) && ownsPeer(c, t, pid) && f in ['drawing', 'photo']
+              && request.resource.data.keys().hasOnly(['data', 'v']);
+            // 生徒・グループ・課題を消すときに、先生が一緒に消す
+            allow delete: if isClassTeacher(c);
+          }
+        }
+
+        // 「参考になった」。ID は {peerId}_{uid}
+        match /likes/{lid} {
+          allow read: if isClassTeacher(c) || (isMember(c) && canSeePeers(c, t));
+          allow create: if isMember(c) && canSeePeers(c, t)
+            && request.resource.data.keys().hasOnly(['pid', 'uid'])
+            && request.resource.data.uid == request.auth.uid
+            && lid == request.resource.data.pid + '_' + request.auth.uid
+            && !(exists(mySubPath(c, t)) && get(mySubPath(c, t)).data.peerId == request.resource.data.pid);
+          allow delete: if isClassTeacher(c) || (signedIn() && resource.data.uid == request.auth.uid);
+        }
+      }
+
+      // 提出。ID は {課題}__{u_生徒 / g_班}
+      match /subs/{id} {
+        allow get: if isClassTeacher(c) || (isMember(c) && isMyKey(c, id.split('__')[1]));
+        allow list: if isClassTeacher(c)
+          || (isMember(c) && (resource.data.ownerKey == 'u_' + mySid()
+            || (member(c).groupId != null && resource.data.ownerKey == 'g_' + member(c).groupId)));
+        allow create, update: if isClassTeacher(c) || (isMember(c) && validStudentSubmit(c, id));
+        allow delete: if isClassTeacher(c);
 
         match /files/{f} {
-          allow read: if isTeacher() || (hasAccount() && isMyKey(key));
-          allow write: if isTeacher()
-            || (hasAccount() && key != '' && key == ownerKeyFor(t) && task(t).status == 'open'
+          allow read: if isClassTeacher(c) || (isMember(c) && isMyKey(c, id.split('__')[1]));
+          allow create, update: if isClassTeacher(c)
+            || (isMember(c) && id.split('__')[1] == ownerKeyFor(c, id.split('__')[0])
+              && task(c, id.split('__')[0]).status == 'open'
               && f in ['drawing', 'photo'] && request.resource.data.keys().hasOnly(['data', 'v']));
+          allow delete: if isClassTeacher(c);
         }
       }
 
-      // みんなの考え（匿名のコピー）
-      match /peers/{pid} {
-        allow read: if isTeacher() || (hasAccount() && canSeePeers(t));
-        allow create, update: if hasAccount() && ownsPeer(t, pid)
-          && request.resource.data.keys().hasOnly(['shortAnswer', 'text', 'drawingV', 'photoV']);
-        allow delete: if isTeacher();
-
-        match /files/{f} {
-          allow read: if isTeacher() || (hasAccount() && canSeePeers(t));
-          allow create, update: if hasAccount() && ownsPeer(t, pid) && f in ['drawing', 'photo']
-            && request.resource.data.keys().hasOnly(['data', 'v']);
-          // 生徒・グループ・課題を消すときに、先生が一緒に消す
-          allow delete: if isTeacher();
-        }
-      }
-
-      // 「参考になった」。ID は {peerId}_{uid}
-      match /likes/{lid} {
-        allow read: if isTeacher() || (hasAccount() && canSeePeers(t));
-        allow create: if hasAccount() && canSeePeers(t)
-          && request.resource.data.keys().hasOnly(['pid', 'uid'])
-          && request.resource.data.uid == request.auth.uid
-          && lid == request.resource.data.pid + '_' + request.auth.uid
-          && !(exists(mySubPath(t)) && get(mySubPath(t)).data.peerId == request.resource.data.pid);
-        allow delete: if isTeacher() || (signedIn() && resource.data.uid == request.auth.uid);
-      }
-
-      // 「わからない」
-      match /help/{sid} {
-        allow get: if isTeacher() || (hasAccount() && mySid() == sid);
-        allow create, update: if hasAccount() && mySid() == sid && task(t).status == 'open'
-          && request.resource.data.keys().hasOnly(['studentId', 'message', 'createdAt'])
-          && request.resource.data.studentId == sid
+      // 「わからない」。ID は {課題}__{生徒}
+      match /help/{id} {
+        allow get: if isClassTeacher(c) || (hasAccount() && id.split('__')[1] == mySid());
+        allow list: if isClassTeacher(c) || (isMember(c) && resource.data.studentId == mySid());
+        allow create, update: if isMember(c)
+          && request.resource.data.keys().hasOnly(['taskId', 'studentId', 'message', 'createdAt'])
+          && request.resource.data.studentId == mySid()
+          && id == request.resource.data.taskId + '__' + mySid()
+          && task(c, request.resource.data.taskId).status == 'open'
           && str(request.resource.data.message, 200);
-        allow delete: if isTeacher() || (hasAccount() && mySid() == sid);
+        allow delete: if isClassTeacher(c) || (hasAccount() && id.split('__')[1] == mySid());
       }
-    }
 
-    function ownsPeer(t, pid) {
-      return task(t).status == 'open' && ownerKeyFor(t) != ''
-        && getAfter(mySubPath(t)).data.peerId == pid;
+      // 小テスト。生徒が見られるのは「生徒に公開」したテストと、その中の自分の得点だけ
+      match /quizzes/{q} {
+        allow read: if isClassTeacher(c) || (isMember(c) && resource.data.published == true);
+        allow write: if isClassTeacher(c);
+      }
+      match /scores/{id} {
+        allow read: if isClassTeacher(c)
+          || (isMember(c) && resource.data.studentId == mySid() && resource.data.published == true);
+        allow write: if isClassTeacher(c);
+      }
     }
 
     // 生徒が書けるのは自分（グループ）の提出の中身だけ。クリアやコメントは先生だけが付ける
-    function validStudentSubmit(t, key) {
+    function validStudentSubmit(c, id) {
       let d = request.resource.data;
+      let t = d.taskId;
       let isNew = resource == null;
       let wasCleared = !isNew && resource.data.status == 'cleared';
-      return key != '' && key == ownerKeyFor(t)
-        && task(t).status == 'open'
-        && d.keys().hasOnly(['ownerKey', 'ownerType', 'ownerId', 'shortAnswer', 'text', 'confidence', 'drawingV',
+      return t is string
+        && ownerKeyFor(c, t) != '' && id == t + '__' + ownerKeyFor(c, t)
+        && task(c, t).status == 'open'
+        && d.keys().hasOnly(['taskId', 'ownerKey', 'ownerType', 'ownerId', 'shortAnswer', 'text', 'confidence', 'drawingV',
           'photoV', 'status', 'autoCorrect', 'feedback', 'attempts', 'version', 'lastEditorId', 'lastEditorName',
           'updatedAt', 'peerId'])
-        && d.ownerKey == key
+        && d.ownerKey == ownerKeyFor(c, t)
         && d.version == (isNew ? 1 : resource.data.version + 1)
         && d.attempts == (isNew ? 1 : resource.data.attempts + 1)
         && d.feedback == (isNew ? '' : resource.data.feedback)
@@ -220,48 +325,24 @@ service cloud.firestore {
         && d.lastEditorId == mySid()
         && str(d.text, 5000) && str(d.shortAnswer, 200)
         && (d.confidence == null || d.confidence in [1, 2, 3, 4])
-        && (task(t).answerKind == 'short'
+        && (task(c, t).answerKind == 'short'
           ? d.status == 'pending'
           : d.status == (wasCleared ? 'cleared' : 'submitted'));
     }
 
-    // ---------- タイマー（先生が動かし、全員が見る） ----------
+    // ---------- 複数クラスにする前のデータ（残しておくだけ。書き換えない） ----------
 
+    match /tasks/{rest=**} {
+      allow read: if isAdmin();
+    }
+    match /quizzes/{rest=**} {
+      allow read: if isAdmin();
+    }
+    match /groups/{g} {
+      allow read: if isAdmin();
+    }
     match /live/{d} {
-      allow read: if signedIn();
-      allow write: if isTeacher();
-    }
-
-    // ---------- 小テスト ----------
-
-    // 生徒が見られるのは「生徒に公開」したテストと、その中の自分の得点だけ。
-    // グループの平均点などは先生の画面で計算するので、生徒には他人の得点は届かない
-    match /quizzes/{q} {
-      allow read: if isTeacher() || (signedIn() && resource.data.published == true);
-      allow write: if isTeacher();
-
-      match /scores/{sid} {
-        allow read: if isTeacher() || (hasAccount() && mySid() == sid && resource.data.published == true);
-        allow write: if isTeacher();
-      }
-    }
-
-    // ---------- コレクショングループ（一覧の読み込み） ----------
-
-    match /{path=**}/subs/{key} {
-      allow read: if isTeacher()
-        || (hasAccount() && (resource.data.ownerKey == 'u_' + mySid()
-          || (me().groupId != null && resource.data.ownerKey == 'g_' + me().groupId)));
-    }
-    match /{path=**}/help/{sid} {
-      allow read: if isTeacher() || (hasAccount() && resource.data.studentId == mySid());
-    }
-    match /{path=**}/scores/{sid} {
-      allow read: if isTeacher()
-        || (hasAccount() && resource.data.studentId == mySid() && resource.data.published == true);
-    }
-    match /{path=**}/likes/{lid} {
-      allow read: if isTeacher();
+      allow read: if isAdmin();
     }
   }
 }

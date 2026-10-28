@@ -67,13 +67,13 @@
         h('p', {}, '最初に先生のアカウントを作成します。'),
         form(async (fd) => {
           await S.setup({
-            className: fd.get('className'),
+            name: fd.get('name'),
             email: fd.get('email'),
             password: fd.get('password'),
           });
           go('teacher');
         },
-        field('クラス名', input('className', 'text', { placeholder: '例：2年3組 数学Ⅱ' })),
+        field('先生の名前', input('name', 'text', { placeholder: '例：佐藤' }), 'ほかの先生や管理画面に表示されます'),
         field('先生のメールアドレス（ログインに使います）', input('email', 'email', { autocomplete: 'username' }), 'パスワードを忘れたときは、ここに再設定のメールが届きます'),
         field('パスワード', input('password', 'password', { autocomplete: 'new-password', minlength: 8 }), '8文字以上'),
         h('button', { type: 'submit', class: 'primary block' }, '作成してはじめる')),
@@ -120,18 +120,37 @@
       field('パスワード（確認）', input('password2', 'password', { autocomplete: 'new-password' })),
       h('button', { type: 'submit', class: 'primary block' }, '登録してはじめる'));
 
+      const teacherForm = form(async (fd) => {
+        await S.teacherSignup({
+          inviteCode: fd.get('inviteCode'),
+          name: fd.get('name'),
+          email: fd.get('email'),
+          password: fd.get('password'),
+        });
+        go('teacher');
+      },
+      h('p', { class: 'small muted', style: { marginTop: 0 } }, '管理者の先生から受け取った招待コードで登録します。登録したあと、自分のクラスを作れます。'),
+      field('招待コード', input('inviteCode', 'text', { autocapitalize: 'characters' })),
+      field('先生の名前', input('name', 'text', { placeholder: '例：佐藤' })),
+      field('メールアドレス（ログインに使います）', input('email', 'email', { autocomplete: 'username' }), 'パスワードを忘れたときは、ここに再設定のメールが届きます'),
+      field('パスワード', input('password', 'password', { autocomplete: 'new-password', minlength: 8 }), '8文字以上'),
+      h('button', { type: 'submit', class: 'primary block' }, '先生として登録'));
+
       const tabs = h('div', { class: 'seg', style: { width: '100%', marginBottom: '12px' } });
       const show = (which) => {
         loginForm.classList.toggle('hidden', which !== 'login');
         registerForm.classList.toggle('hidden', which !== 'register');
+        teacherForm.classList.toggle('hidden', which !== 'teacher');
         [...tabs.children].forEach((b) => b.classList.toggle('on', b.dataset.tab === which));
       };
       MB.fill(tabs,
         h('button', { 'data-tab': 'login', style: { flex: 1 }, onclick: () => show('login') }, 'ログイン'),
-        status.registrationOpen ? h('button', { 'data-tab': 'register', style: { flex: 1 }, onclick: () => show('register') }, 'はじめての人') : null,
+        h('button', { 'data-tab': 'register', style: { flex: 1 }, onclick: () => show('register') }, 'はじめての生徒'),
       );
-      MB.fill(view, tabs, loginForm, registerForm);
-      show(status.registrationOpen ? tab : 'login');
+      MB.fill(view, tabs, loginForm, registerForm, teacherForm,
+        h('p', { class: 'small muted', style: { textAlign: 'center' } },
+          h('a', { href: '#', onclick: (e) => { e.preventDefault(); show('teacher'); } }, '先生の登録はこちら')));
+      show(tab);
     }
 
     (async () => {
@@ -142,11 +161,10 @@
         MB.fill(view, h('div', { class: 'card error' }, `接続できません：${err.message}`));
         return;
       }
-      $('#class-name').textContent = status.className;
       if (status.needsSetup) return setupView();
       const who = await S.whoami();
       if (who.role) return go(who.role);
-      authView(status, params.get('join') ? 'register' : 'login');
+      authView(status, params.get('join') ? 'register' : params.get('teacher') ? 'teacher' : 'login');
     })();
   </script>
 </body>

@@ -7,5 +7,5 @@ export {
 } from 'firebase/auth';
 export {
   initializeFirestore, connectFirestoreEmulator, doc, collection, collectionGroup, query, where, onSnapshot,
-  getDoc, getDocs, setDoc, updateDoc, deleteDoc, writeBatch, runTransaction, deleteField,
+  getDoc, getDocs, setDoc, updateDoc, deleteDoc, writeBatch, runTransaction, deleteField, arrayUnion, arrayRemove,
 } from 'firebase/firestore';

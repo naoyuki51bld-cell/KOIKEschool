@@ -155,24 +155,37 @@
 
   const publicConfig = wrap(async () => {
     const s = await F.getDoc(ref('config/main'));
-    if (!s.exists()) return { needsSetup: true, className: '数学ボード', registrationOpen: false };
-    const d = s.data();
-    return { needsSetup: false, className: d.className, registrationOpen: !!d.registrationOpen };
+    return { needsSetup: !s.exists() };
   });
 
-  const setup = wrap(async ({ className, email, password }) => {
+  // 新しく立ち上げたときだけ使う：最初の先生（管理者）を作る
+  const setup = wrap(async ({ name, email, password }) => {
     const exists = await F.getDoc(ref('config/main'));
     if (exists.exists()) throw new Error('初期設定は完了しています');
     if (String(password || '').length < 8) throw new Error('先生のパスワードは8文字以上にしてください');
     const cred = await F.createUserWithEmailAndPassword(auth, String(email).trim(), password);
-    await F.setDoc(ref('config/main'), {
-      teacherUid: cred.user.uid,
-      className: String(className || '数学').slice(0, 40),
-      registrationOpen: true,
+    await F.setDoc(ref('config/main'), { teacherUid: cred.user.uid, className: '', registrationOpen: false });
+    await F.setDoc(ref('config/teacherInvite'), { code: randomCode(8) });
+    await F.setDoc(ref(`teachers/${cred.user.uid}`), {
+      name: String(name || '').trim().slice(0, 30) || '先生', email: cred.user.email, inviteCode: '', createdAt: now(),
     });
-    await F.setDoc(ref('config/secret'), { joinCode: randomCode() });
-    await F.setDoc(ref('config/answers'), {});
-    await F.setDoc(ref('config/present'), { taskId: null, submissionKeys: [], showNames: false, showQr: false });
+  });
+
+  // 管理者から受け取った招待コードで、先生として登録する
+  const teacherSignup = wrap(async ({ inviteCode, name, email, password }) => {
+    const n = String(name || '').trim().slice(0, 30);
+    if (!n) throw new Error('名前を入力してください');
+    if (String(password || '').length < 8) throw new Error('先生のパスワードは8文字以上にしてください');
+    const cred = await F.createUserWithEmailAndPassword(auth, String(email).trim(), password);
+    try {
+      await F.setDoc(ref(`teachers/${cred.user.uid}`), {
+        name: n, email: cred.user.email, inviteCode: String(inviteCode || '').normalize('NFKC').trim().toUpperCase(), createdAt: now(),
+      });
+    } catch (err) {
+      await F.deleteUser(cred.user).catch(() => {});
+      if (err.code === 'permission-denied') throw new Error('招待コードが違います');
+      throw err;
+    }
   });
 
   const login = wrap(async (id, password) => {
@@ -186,32 +199,60 @@
     await F.signInWithEmailAndPassword(auth, email, password);
   });
 
+  const cleanCode = (code) => String(code || '').normalize('NFKC').trim().toUpperCase();
+
+  // 参加コード → クラスID
+  async function classIdOf(joinCode) {
+    const code = cleanCode(joinCode);
+    if (!/^[A-Z0-9]{4,12}$/.test(code)) throw new Error('参加コードが違います');
+    const s = await F.getDoc(ref(`joinCodes/${code}`));
+    if (!s.exists()) throw new Error('参加コードが違います');
+    return { code, classId: s.data().classId };
+  }
+
+  function memberDoc(name, number, code) {
+    return { name, number, groupId: null, joinCode: code, joinedAt: now() };
+  }
+
+  // はじめての生徒：アカウントを作って、参加コードのクラスに入る
   const register = wrap(async ({ joinCode, name, number, password }) => {
     const clean = cleanName(name);
     checkPassword(password);
     const num = parseNumber(number);
+    const { code, classId } = await classIdOf(joinCode);
     const key = nameKey(clean);
     if ((await F.getDoc(ref(`names/${key}`))).exists()) throw new Error('その名前はすでに使われています。別の名前にしてください');
     const email = studentEmail();
     const cred = await F.createUserWithEmailAndPassword(auth, email, password);
     const sid = randomId();
     const batch = F.writeBatch(db);
-    batch.set(ref(`students/${sid}`), {
-      name: clean, number: num, uid: cred.user.uid, joinCode: String(joinCode || '').normalize('NFKC').trim().toUpperCase(),
-      groupId: null, createdAt: now(),
-    });
+    batch.set(ref(`students/${sid}`), { name: clean, uid: cred.user.uid, classIds: [classId], createdAt: now() });
     batch.set(ref(`accounts/${cred.user.uid}`), { studentId: sid });
     batch.set(ref(`names/${key}`), { email, studentId: sid });
+    batch.set(ref(`classes/${classId}/members/${sid}`), memberDoc(clean, num, code));
     try {
       await batch.commit();
     } catch (err) {
       await F.deleteUser(cred.user).catch(() => {});
-      if (err.code === 'permission-denied') {
-        const cfg = await publicConfig();
-        throw new Error(cfg.registrationOpen ? '参加コードが違うか、その名前はすでに使われています' : '現在、新規登録は締め切られています');
-      }
+      if (err.code === 'permission-denied') throw new Error('このクラスは今、新しい登録を受け付けていません。先生に伝えてください');
       throw err;
     }
+  });
+
+  // ログイン中の生徒が、別のクラスにも入る
+  const joinClass = wrap(async (who, { joinCode, number }) => {
+    const { code, classId } = await classIdOf(joinCode);
+    if ((who.classIds || []).includes(classId)) throw new Error('このクラスにはもう入っています');
+    const batch = F.writeBatch(db);
+    batch.set(ref(`classes/${classId}/members/${who.sid}`), memberDoc(who.name, parseNumber(number), code));
+    batch.update(ref(`students/${who.sid}`), { classIds: F.arrayUnion(classId) });
+    try {
+      await batch.commit();
+    } catch (err) {
+      if (err.code === 'permission-denied') throw new Error('このクラスは今、新しい登録を受け付けていません。先生に伝えてください');
+      throw err;
+    }
+    return classId;
   });
 
   const logout = wrap(() => F.signOut(auth));
@@ -233,20 +274,68 @@
   async function whoami() {
     const user = await waitForAuth();
     if (!user) return { role: null };
-    const cfg = await F.getDoc(ref('config/main'));
-    if (cfg.exists() && cfg.data().teacherUid === user.uid) return { role: 'teacher', uid: user.uid, email: user.email };
     try {
+      const cfg = await F.getDoc(ref('config/main'));
+      const admin = cfg.exists() && cfg.data().teacherUid === user.uid;
+      const teacher = await F.getDoc(ref(`teachers/${user.uid}`)).catch(() => null);
+      if (admin || (teacher && teacher.exists())) {
+        return { role: 'teacher', uid: user.uid, email: user.email, admin, name: teacher && teacher.exists() ? teacher.data().name : '' };
+      }
       const acc = await F.getDoc(ref(`accounts/${user.uid}`));
       if (!acc.exists()) {
         // パスワードが再設定された古いログインなど
         await F.signOut(auth);
         return { role: null };
       }
-      return { role: 'student', uid: user.uid, sid: acc.data().studentId };
+      const sid = acc.data().studentId;
+      const st = await F.getDoc(ref(`students/${sid}`));
+      const d = st.exists() ? st.data() : {};
+      return { role: 'student', uid: user.uid, sid, name: d.name || '', classIds: d.classIds || [] };
     } catch {
       return { role: null };
     }
   }
+
+  // ---------- クラス ----------
+
+  // 先生が担当しているクラス
+  const teacherClasses = wrap(async (uid) => {
+    const snap = await F.getDocs(F.query(col('classes'), F.where('teacherUids', 'array-contains', uid)));
+    return snap.docs.map((d) => ({ id: d.id, ...d.data() })).sort((a, b) => a.createdAt - b.createdAt);
+  });
+
+  // 生徒が入っているクラス
+  const studentClasses = wrap(async (classIds) => {
+    const list = await Promise.all(classIds.map((id) => F.getDoc(ref(`classes/${id}`)).then((s) => (s.exists() ? { id, ...s.data() } : null)).catch(() => null)));
+    return list.filter(Boolean);
+  });
+
+  const createClass = wrap(async (uid, name) => {
+    const n = String(name || '').trim().slice(0, 40);
+    if (!n) throw new Error('クラス名を入力してください');
+    const id = randomId(12);
+    const code = randomCode();
+    await F.setDoc(ref(`classes/${id}`), { name: n, ownerUid: uid, teacherUids: [uid], registrationOpen: true, createdAt: now() });
+    const batch = F.writeBatch(db);
+    batch.set(ref(`classes/${id}/private/join`), { code });
+    batch.set(ref(`joinCodes/${code}`), { classId: id });
+    batch.set(ref(`classes/${id}/private/answers`), {});
+    await batch.commit();
+    return id;
+  });
+
+  // 先生の一覧（共同担当を選ぶとき・管理者の画面で使う）
+  const listTeachers = wrap(async () => {
+    const snap = await F.getDocs(col('teachers'));
+    return snap.docs.map((d) => ({ uid: d.id, name: d.data().name, email: d.data().email })).sort((a, b) => a.name.localeCompare(b.name, 'ja'));
+  });
+
+  // 管理者：先生の招待コード
+  const teacherInvite = wrap(async (regenerate) => {
+    if (regenerate) await F.setDoc(ref('config/teacherInvite'), { code: randomCode(8) });
+    const s = await F.getDoc(ref('config/teacherInvite'));
+    return s.exists() ? s.data().code : '';
+  });
 
   // onSnapshot を張る。失敗したら知らせ、インデックスの準備中などのときは少し待って張り直す
   function live(target, onNext, onFail) {
@@ -271,8 +360,8 @@
   // タイマー（live/timer）。無いときは止まっているものとする
   const TIMER_OFF = { kind: 'timer', state: 'stopped', durationMs: 0, accumulatedMs: 0, startedAt: null, label: '' };
 
-  function watchTimer(state, ev, onFail) {
-    return live(ref('live/timer'), (s) => {
+  function watchTimer(base, state, ev, onFail) {
+    return live(ref(`${base}/live/timer`), (s) => {
       state.timer = { ...TIMER_OFF, ...(s.exists() ? s.data() : {}) };
       ev.emit('timer');
     }, onFail);
@@ -299,16 +388,20 @@
     };
   }
 
+  // 提出（classes/{class}/subs/{課題}__{u_生徒 / g_班}）
   function subData(s) {
-    return { path: s.ref.path, taskId: s.ref.parent.parent.id, key: s.id, ...s.data() };
+    const d = s.data();
+    return { path: s.ref.path, key: d.ownerKey, ...d };
   }
 
   // ================= 生徒 =================
 
-  function studentStore(who) {
+  function studentStore(who, classId) {
+    const B = `classes/${classId}`;
     const ev = emitter();
     const state = {
       ready: false,
+      classId,
       uid: who.uid,
       sid: who.sid,
       me: null,
@@ -339,8 +432,8 @@
       if (state.errors.delete(name)) ev.emit('error');
     };
 
-    offs.push(live(ref('config/main'), (s) => {
-      state.className = s.exists() ? s.data().className : '';
+    offs.push(live(ref(B), (s) => {
+      state.className = s.exists() ? s.data().name : '';
       ev.emit('config');
     }, failed('config')));
 
@@ -350,11 +443,11 @@
       state.group = null;
       for (const [taskId, s] of state.subs) if (s.ownerType === 'group') state.subs.delete(taskId);
       if (!groupId) return;
-      groupOffs.push(live(ref(`groups/${groupId}`), (s) => {
+      groupOffs.push(live(ref(`${B}/groups/${groupId}`), (s) => {
         state.group = s.exists() ? { id: s.id, ...s.data() } : null;
         ev.emit('group');
       }, failed('group')));
-      groupOffs.push(live(F.query(F.collectionGroup(db, 'subs'), F.where('ownerKey', '==', `g_${groupId}`)), (snap) => {
+      groupOffs.push(live(F.query(col(`${B}/subs`), F.where('ownerKey', '==', `g_${groupId}`)), (snap) => {
         ok('subsG');
         applySubs(snap, 'group');
       }, failed('subsG')));
@@ -373,7 +466,7 @@
       return type;
     }
 
-    offs.push(live(ref(`students/${who.sid}`), (s) => {
+    offs.push(live(ref(`${B}/members/${who.sid}`), (s) => {
       if (!s.exists()) return ev.emit('denied');
       ok('me');
       const prevGroup = state.me && state.me.groupId;
@@ -383,7 +476,7 @@
       ev.emit('me');
     }, failed('me')));
 
-    offs.push(live(F.query(col('tasks'), F.where('status', 'in', ['open', 'closed'])), (snap) => {
+    offs.push(live(F.query(col(`${B}/tasks`), F.where('status', 'in', ['open', 'closed'])), (snap) => {
       ok('tasks');
       snap.docChanges().forEach((c) => {
         if (c.type === 'removed') state.tasks.delete(c.doc.id);
@@ -393,17 +486,17 @@
       ev.emit('tasks');
     }, failed('tasks')));
 
-    offs.push(live(F.query(F.collectionGroup(db, 'subs'), F.where('ownerKey', '==', `u_${who.sid}`)), (snap) => {
+    offs.push(live(F.query(col(`${B}/subs`), F.where('ownerKey', '==', `u_${who.sid}`)), (snap) => {
       ok('subsU');
       applySubs(snap, 'user');
       markLoaded('subsU');
       ev.emit('subs');
     }, failed('subsU')));
 
-    offs.push(live(F.query(F.collectionGroup(db, 'help'), F.where('studentId', '==', who.sid)), (snap) => {
+    offs.push(live(F.query(col(`${B}/help`), F.where('studentId', '==', who.sid)), (snap) => {
       ok('help');
       snap.docChanges().forEach((c) => {
-        const taskId = c.doc.ref.parent.parent.id;
+        const { taskId } = c.doc.data();
         if (c.type === 'removed') state.help.delete(taskId);
         else state.help.set(taskId, c.doc.data());
       });
@@ -411,9 +504,9 @@
       ev.emit('help');
     }, failed('help')));
 
-    offs.push(watchTimer(state, ev, failed('timer')));
+    offs.push(watchTimer(B, state, ev, failed('timer')));
 
-    offs.push(live(F.query(col('quizzes'), F.where('published', '==', true)), (snap) => {
+    offs.push(live(F.query(col(`${B}/quizzes`), F.where('published', '==', true)), (snap) => {
       ok('quizzes');
       snap.docChanges().forEach((c) => {
         if (c.type === 'removed') state.quizzes.delete(c.doc.id);
@@ -422,10 +515,10 @@
       ev.emit('quizzes');
     }, failed('quizzes')));
 
-    offs.push(live(F.query(F.collectionGroup(db, 'scores'), F.where('studentId', '==', who.sid), F.where('published', '==', true)), (snap) => {
+    offs.push(live(F.query(col(`${B}/scores`), F.where('studentId', '==', who.sid), F.where('published', '==', true)), (snap) => {
       ok('scores');
       snap.docChanges().forEach((c) => {
-        const quizId = c.doc.ref.parent.parent.id;
+        const { quizId } = c.doc.data();
         if (c.type === 'removed') state.scores.delete(quizId);
         else state.scores.set(quizId, c.doc.data());
       });
@@ -461,6 +554,8 @@
       return v ? { path: `${base}/files/${name}`, v } : null;
     }
 
+    const taskImage = (t) => imageRef(`${B}/tasks/${t.id}`, 'image', t.imageV);
+
     // 画面用の提出データ
     function submissionView(task, s) {
       if (!s) return null;
@@ -482,7 +577,7 @@
       if (!key) throw new Error('グループが決まっていないため提出できません。先生に伝えてください');
       if (form.drawing && form.drawing !== 'keep') checkImage(form.drawing);
       if (form.photo && form.photo !== 'keep') checkImage(form.photo);
-      const subPath = `tasks/${taskId}/subs/${key}`;
+      const subPath = `${B}/subs/${taskId}__${key}`;
       const shortAnswer = task.answerKind === 'short' ? String(form.shortAnswer || '').trim().slice(0, 200) : '';
       const text = task.allowText ? String(form.text || '').slice(0, 5000) : '';
       if (task.answerKind === 'short' && !shortAnswer) throw new Error('答えを入力してください');
@@ -496,7 +591,7 @@
           throw e;
         }
         const peerId = old ? old.peerId : randomId();
-        const peerPath = `tasks/${taskId}/peers/${peerId}`;
+        const peerPath = `${B}/tasks/${taskId}/peers/${peerId}`;
         const next = (field, value, allowed) => {
           const oldV = old ? old[`${field}V`] : null;
           if (!allowed || value === undefined || value === 'keep') return { v: oldV || null };
@@ -508,6 +603,7 @@
         if (!shortAnswer && !text.trim() && !drawing.v && !photo.v) throw new Error('何か書いてから提出してください');
         const status = task.answerKind === 'short' ? 'pending' : (old && old.status === 'cleared' ? 'cleared' : 'submitted');
         const data = {
+          taskId,
           ownerKey: key,
           ownerType: task.mode === 'group' ? 'group' : 'user',
           ownerId: key.slice(2),
@@ -539,10 +635,10 @@
       });
     });
 
-    const setHelp = wrap((taskId, msg) => F.setDoc(ref(`tasks/${taskId}/help/${state.sid}`), {
-      studentId: state.sid, message: String(msg || '').slice(0, 200), createdAt: now(),
+    const setHelp = wrap((taskId, msg) => F.setDoc(ref(`${B}/help/${taskId}__${state.sid}`), {
+      taskId, studentId: state.sid, message: String(msg || '').slice(0, 200), createdAt: now(),
     }));
-    const clearHelp = wrap((taskId) => F.deleteDoc(ref(`tasks/${taskId}/help/${state.sid}`)));
+    const clearHelp = wrap((taskId) => F.deleteDoc(ref(`${B}/help/${taskId}__${state.sid}`)));
 
     // みんなの考え。見ている間だけ受け取る
     function watchPeers(taskId, cb) {
@@ -562,8 +658,8 @@
               mine: !!own && own.peerId === id,
               shortAnswer: p.shortAnswer,
               text: p.text,
-              drawing: imageRef(`tasks/${taskId}/peers/${id}`, 'drawing', p.drawingV),
-              photo: imageRef(`tasks/${taskId}/peers/${id}`, 'photo', p.photoV),
+              drawing: imageRef(`${B}/tasks/${taskId}/peers/${id}`, 'drawing', p.drawingV),
+              photo: imageRef(`${B}/tasks/${taskId}/peers/${id}`, 'photo', p.photoV),
               likes: l.length,
               liked: l.some((x) => x.uid === state.uid),
             };
@@ -574,11 +670,11 @@
         if (err.code !== 'permission-denied') console.error(err);
         cb(null);
       };
-      const off1 = F.onSnapshot(col(`tasks/${taskId}/peers`), (snap) => {
+      const off1 = F.onSnapshot(col(`${B}/tasks/${taskId}/peers`), (snap) => {
         snap.docChanges().forEach((c) => (c.type === 'removed' ? peers.delete(c.doc.id) : peers.set(c.doc.id, c.doc.data())));
         send();
       }, fail);
-      const off2 = F.onSnapshot(col(`tasks/${taskId}/likes`), (snap) => {
+      const off2 = F.onSnapshot(col(`${B}/tasks/${taskId}/likes`), (snap) => {
         snap.docChanges().forEach((c) => (c.type === 'removed' ? likes.delete(c.doc.id) : likes.set(c.doc.id, c.doc.data())));
         send();
       }, fail);
@@ -586,7 +682,7 @@
     }
 
     const toggleLike = wrap(async (taskId, pid, liked) => {
-      const path = `tasks/${taskId}/likes/${pid}_${state.uid}`;
+      const path = `${B}/tasks/${taskId}/likes/${pid}_${state.uid}`;
       if (liked) await F.deleteDoc(ref(path));
       else await F.setDoc(ref(path), { pid, uid: state.uid });
     });
@@ -602,24 +698,28 @@
         batch.delete(ref(`names/${oldKey}`));
       }
       batch.update(ref(`students/${state.sid}`), { name: clean });
+      for (const c of who.classIds || [classId]) batch.update(ref(`classes/${c}/members/${state.sid}`), { name: clean });
       await batch.commit();
+      who.name = clean;
     });
 
     return {
-      state, on: ev.on, sortedTasks, ownerKey, mySub, canSeePeers, submissionView, submit, setHelp, clearHelp,
+      state, on: ev.on, sortedTasks, taskImage, ownerKey, mySub, canSeePeers, submissionView, submit, setHelp, clearHelp,
       watchPeers, toggleLike, changeName, myQuizzes, stop: () => { offs.forEach((f) => f()); groupOffs.forEach((f) => f()); },
     };
   }
 
   // ================= 先生 =================
 
-  function teacherStore(who) {
+  function teacherStore(who, classId) {
+    const B = `classes/${classId}`;
     const ev = emitter();
     const state = {
       ready: false,
+      classId,
       uid: who.uid,
       email: who.email,
-      settings: { className: '', registrationOpen: true, joinCode: '' },
+      settings: { className: '', registrationOpen: true, joinCode: '', ownerUid: '', teacherUids: [] },
       answers: {},
       present: { taskId: null, submissionKeys: [], mode: 'selected', showNames: false, showQr: false },
       students: new Map(),
@@ -635,7 +735,7 @@
     };
     const offs = [];
     const loaded = new Set();
-    const need = ['main', 'secret', 'answers', 'students', 'groups', 'tasks', 'subs', 'help', 'quizzes', 'scores'];
+    const need = ['class', 'join', 'answers', 'students', 'groups', 'tasks', 'subs', 'help', 'quizzes', 'scores'];
     const markLoaded = (n) => {
       loaded.add(n);
       if (!state.ready && need.every((x) => loaded.has(x))) {
@@ -669,22 +769,38 @@
       if (name === 'students' || name === 'groups') syncGroupMembers();
     }, failed(name)));
 
-    watchDoc('config/main', 'main', (d) => Object.assign(state.settings, { className: d?.className || '', registrationOpen: !!d?.registrationOpen }));
-    watchDoc('config/secret', 'secret', (d) => { state.settings.joinCode = d?.joinCode || ''; });
-    watchDoc('config/answers', 'answers', (d) => { state.answers = d || {}; autoJudge(); });
-    watchDoc('config/present', 'present', (d) => { state.present = { taskId: null, submissionKeys: [], mode: 'selected', showNames: false, showQr: false, ...(d || {}) }; });
-    watchCol(col('students'), 'students', state.students, (d) => d.id, (d) => ({ id: d.id, ...d.data() }));
-    watchCol(col('groups'), 'groups', state.groups, (d) => d.id, (d) => ({ id: d.id, ...d.data() }));
-    watchCol(col('tasks'), 'tasks', state.tasks, (d) => d.id, (d) => ({ id: d.id, ...d.data() }));
-    watchCol(F.query(F.collectionGroup(db, 'subs'), F.where('ownerKey', '>=', '')), 'subs', state.subs, (d) => d.ref.path, subData);
-    watchCol(F.query(F.collectionGroup(db, 'help'), F.where('studentId', '>=', '')), 'help', state.help,
-      (d) => `${d.ref.parent.parent.id}:${d.id}`, (d) => ({ taskId: d.ref.parent.parent.id, ...d.data() }));
-    watchCol(F.query(F.collectionGroup(db, 'likes'), F.where('pid', '>=', '')), 'likes', state.likes, (d) => d.ref.path,
-      (d) => ({ taskId: d.ref.parent.parent.id, ...d.data() }));
-    watchCol(col('quizzes'), 'quizzes', state.quizzes, (d) => d.id, (d) => ({ id: d.id, ...d.data() }));
-    offs.push(watchTimer(state, ev, failed('timer')));
-    watchCol(F.query(F.collectionGroup(db, 'scores'), F.where('studentId', '>=', '')), 'scores', state.scores,
-      (d) => `${d.ref.parent.parent.id}:${d.id}`, (d) => ({ quizId: d.ref.parent.parent.id, ...d.data() }));
+    watchDoc(B, 'class', (d) => Object.assign(state.settings, {
+      className: d?.name || '', registrationOpen: !!d?.registrationOpen, ownerUid: d?.ownerUid || '', teacherUids: d?.teacherUids || [],
+    }));
+    watchDoc(`${B}/private/join`, 'join', (d) => { state.settings.joinCode = d?.code || ''; });
+    watchDoc(`${B}/private/answers`, 'answers', (d) => { state.answers = d || {}; autoJudge(); });
+    watchDoc(`${B}/private/present`, 'present', (d) => { state.present = { taskId: null, submissionKeys: [], mode: 'selected', showNames: false, showQr: false, ...(d || {}) }; });
+    // このクラスの名簿（出席番号・班はクラスごと）
+    watchCol(col(`${B}/members`), 'students', state.students, (d) => d.id, (d) => ({ id: d.id, ...d.data() }));
+    watchCol(col(`${B}/groups`), 'groups', state.groups, (d) => d.id, (d) => ({ id: d.id, ...d.data() }));
+    watchCol(col(`${B}/tasks`), 'tasks', state.tasks, (d) => d.id, (d) => ({ id: d.id, ...d.data() }));
+    watchCol(col(`${B}/subs`), 'subs', state.subs, (d) => d.ref.path, subData);
+    watchCol(col(`${B}/help`), 'help', state.help, (d) => `${d.data().taskId}:${d.data().studentId}`, (d) => ({ ...d.data() }));
+    watchCol(col(`${B}/quizzes`), 'quizzes', state.quizzes, (d) => d.id, (d) => ({ id: d.id, ...d.data() }));
+    offs.push(watchTimer(B, state, ev, failed('timer')));
+    watchCol(col(`${B}/scores`), 'scores', state.scores, (d) => `${d.data().quizId}:${d.data().studentId}`, (d) => ({ ...d.data() }));
+
+    // 「参考になった」は、回答タブで見ている課題の分だけ受け取る
+    let likesOff = null;
+    let likesTask = null;
+    function watchLikes(taskId) {
+      if (taskId === likesTask) return;
+      if (likesOff) likesOff();
+      state.likes.clear();
+      likesTask = taskId;
+      likesOff = taskId ? live(col(`${B}/tasks/${taskId}/likes`), (snap) => {
+        snap.docChanges().forEach((c) => {
+          if (c.type === 'removed') state.likes.delete(c.doc.ref.path);
+          else state.likes.set(c.doc.ref.path, { taskId, ...c.doc.data() });
+        });
+        ev.emit('likes');
+      }, failed('likes')) : null;
+    }
 
     // --- 自動判定：先生の画面が開いている間、届いた短答をすぐ判定する ---
     const judging = new Set();
@@ -718,7 +834,7 @@
         ? [...state.students.values()].filter((st) => st.groupId === s.ownerId).map((st) => st.id)
         : [s.ownerId];
       return Promise.all(sids.filter((sid) => state.help.has(`${s.taskId}:${sid}`))
-        .map((sid) => F.deleteDoc(ref(`tasks/${s.taskId}/help/${sid}`))));
+        .map((sid) => F.deleteDoc(ref(`${B}/help/${s.taskId}__${sid}`))));
     }
 
     // グループのメンバー名を、生徒が見られる groups の文書に写す
@@ -730,7 +846,7 @@
         for (const g of state.groups.values()) {
           const names = [...state.students.values()].filter((s) => s.groupId === g.id).map((s) => s.name).sort();
           if (JSON.stringify(names) !== JSON.stringify(g.members || [])) {
-            F.updateDoc(ref(`groups/${g.id}`), { members: names }).catch(console.error);
+            F.updateDoc(ref(`${B}/groups/${g.id}`), { members: names }).catch(console.error);
           }
         }
       }, 500);
@@ -760,13 +876,15 @@
       })).sort((a, b) => a.updatedAt - b.updatedAt);
     }
 
+    const taskImage = (t) => (t.imageV ? { path: `${B}/tasks/${t.id}/files/image`, v: t.imageV } : null);
+
     function taskView(t) {
       const a = state.answers[t.id] || {};
       return {
         ...t,
         accepted: { answers: a.answers || [], mode: a.mode || 'value' },
         hintText: a.hint || '',
-        image: t.imageV ? { path: `tasks/${t.id}/files/image`, v: t.imageV } : null,
+        image: taskImage(t),
       };
     }
 
@@ -774,10 +892,26 @@
 
     const updateSettings = wrap(async ({ className, registrationOpen, regenerateJoinCode }) => {
       const patch = {};
-      if (className !== undefined) patch.className = String(className).slice(0, 40);
+      if (className !== undefined) {
+        patch.name = String(className).trim().slice(0, 40);
+        if (!patch.name) throw new Error('クラス名を入力してください');
+      }
       if (registrationOpen !== undefined) patch.registrationOpen = !!registrationOpen;
-      if (Object.keys(patch).length) await F.updateDoc(ref('config/main'), patch);
-      if (regenerateJoinCode) await F.setDoc(ref('config/secret'), { joinCode: randomCode() });
+      if (Object.keys(patch).length) await F.updateDoc(ref(B), patch);
+      if (regenerateJoinCode) {
+        const code = randomCode();
+        const batch = F.writeBatch(db);
+        if (state.settings.joinCode) batch.delete(ref(`joinCodes/${state.settings.joinCode}`));
+        batch.set(ref(`joinCodes/${code}`), { classId });
+        batch.set(ref(`${B}/private/join`), { code });
+        await batch.commit();
+      }
+    });
+
+    // 共同担当の先生（クラスを作った先生だけが変えられる）
+    const setCoTeacher = wrap(async (uid, add) => {
+      if (!add && uid === state.settings.ownerUid) throw new Error('クラスを作った先生は外せません');
+      await F.updateDoc(ref(B), { teacherUids: add ? F.arrayUnion(uid) : F.arrayRemove(uid) });
     });
 
     // --- 生徒 ---
@@ -791,19 +925,20 @@
       const uid = await createAccountAside(email, password);
       const sid = randomId();
       const batch = F.writeBatch(db);
-      batch.set(ref(`students/${sid}`), {
-        name: clean, number: parseNumber(number), uid, joinCode: '', groupId: null, createdAt: now(),
-      });
+      batch.set(ref(`students/${sid}`), { name: clean, uid, classIds: [classId], createdAt: now() });
       batch.set(ref(`accounts/${uid}`), { studentId: sid });
       batch.set(ref(`names/${key}`), { email, studentId: sid });
+      batch.set(ref(`${B}/members/${sid}`), { name: clean, number: parseNumber(number), groupId: null, joinCode: '', joinedAt: now() });
       await batch.commit();
       return { password };
     });
 
     // 新しいログイン用アカウントを作って付け替える（古いパスワードのログインは使えなくなる）
     const resetStudentPassword = wrap(async (sid) => {
-      const st = state.students.get(sid);
-      if (!st) throw new Error('生徒が見つかりません');
+      const member = state.students.get(sid);
+      if (!member) throw new Error('生徒が見つかりません');
+      const g = await F.getDoc(ref(`students/${sid}`));
+      const st = g.exists() ? g.data() : { name: member.name };
       const password = tempPassword();
       const email = studentEmail();
       const uid = await createAccountAside(email, password);
@@ -821,7 +956,7 @@
       if (!st) throw new Error('生徒が見つかりません');
       const batch = F.writeBatch(db);
       const patch = {};
-      if (name !== undefined) {
+      if (name !== undefined && cleanName(name) !== st.name) {
         const clean = cleanName(name);
         const oldKey = nameKey(st.name);
         const newKey = nameKey(clean);
@@ -832,20 +967,41 @@
           batch.delete(ref(`names/${oldKey}`));
         }
         patch.name = clean;
+        batch.update(ref(`students/${sid}`), { name: clean });
       }
       if (number !== undefined) patch.number = parseNumber(number);
       if (groupId !== undefined) patch.groupId = groupId || null;
-      batch.update(ref(`students/${sid}`), patch);
+      batch.update(ref(`${B}/members/${sid}`), patch);
       await batch.commit();
+      // 名前は全クラス共通なので、ほかのクラスの名簿の名前も合わせる（ほかのクラスで失敗しても、このクラスの変更は残す）
+      if (patch.name) {
+        const g = await F.getDoc(ref(`students/${sid}`)).catch(() => null);
+        const others = ((g && g.exists() && g.data().classIds) || []).filter((c) => c !== classId);
+        await Promise.all(others.map((c) => F.updateDoc(ref(`classes/${c}/members/${sid}`), { name: patch.name }).catch(() => {})));
+      }
+    });
+
+    // 出席番号をまとめて変える。entries: [{ studentId, number }]
+    const updateNumbers = wrap(async (entries) => {
+      const changes = entries
+        .map(({ studentId, number }) => ({ studentId, number: parseNumber(number) }))
+        .filter(({ studentId, number }) => state.students.has(studentId) && state.students.get(studentId).number !== number);
+      for (let i = 0; i < changes.length; i += 400) {
+        const batch = F.writeBatch(db);
+        changes.slice(i, i + 400).forEach(({ studentId, number }) => batch.update(ref(`${B}/members/${studentId}`), { number }));
+        await batch.commit();
+      }
+      return changes.length;
     });
 
     // 提出と、そのファイル・匿名コピーを消す
     async function deleteSubmission(s) {
       const paths = [`${s.path}/files/drawing`, `${s.path}/files/photo`];
       if (s.peerId) {
-        const base = `tasks/${s.taskId}/peers/${s.peerId}`;
+        const base = `${B}/tasks/${s.taskId}/peers/${s.peerId}`;
         paths.push(`${base}/files/drawing`, `${base}/files/photo`, base);
-        for (const [p, l] of state.likes) if (l.taskId === s.taskId && l.pid === s.peerId) paths.push(p);
+        const likes = await F.getDocs(F.query(col(`${B}/tasks/${s.taskId}/likes`), F.where('pid', '==', s.peerId)));
+        likes.forEach((d) => paths.push(d.ref.path));
       }
       paths.push(s.path);
       await commitDeletes(paths);
@@ -859,30 +1015,31 @@
       }
     }
 
+    // クラスから外す。生徒のアカウント（あだ名・パスワード）はほかのクラスで使うかもしれないので残す
     const deleteStudent = wrap(async (sid) => {
       const st = state.students.get(sid);
       if (!st) return;
-      await commitDeletes([...state.scores.values()].filter((x) => x.studentId === sid).map((x) => `quizzes/${x.quizId}/scores/${sid}`));
+      await commitDeletes([...state.scores.values()].filter((x) => x.studentId === sid).map((x) => `${B}/scores/${x.quizId}__${sid}`));
       for (const s of [...state.subs.values()]) if (s.ownerType === 'user' && s.ownerId === sid) await deleteSubmission(s);
-      const paths = [...state.help.values()].filter((h) => h.studentId === sid).map((h) => `tasks/${h.taskId}/help/${sid}`);
-      paths.push(`names/${nameKey(st.name)}`, `students/${sid}`);
-      if (st.uid) paths.push(`accounts/${st.uid}`);
+      const paths = [...state.help.values()].filter((h) => h.studentId === sid).map((h) => `${B}/help/${h.taskId}__${sid}`);
+      paths.push(`${B}/members/${sid}`);
       await commitDeletes(paths);
+      await F.updateDoc(ref(`students/${sid}`), { classIds: F.arrayRemove(classId) }).catch(() => {});
     });
 
     // --- グループ ---
 
     const addGroup = wrap(async (name) => {
       const count = state.groups.size;
-      await F.setDoc(ref(`groups/${randomId(10)}`), { name: String(name || '').trim().slice(0, 30) || `${count + 1}班`, sort: count + 1, members: [] });
+      await F.setDoc(ref(`${B}/groups/${randomId(10)}`), { name: String(name || '').trim().slice(0, 30) || `${count + 1}班`, sort: count + 1, members: [] });
     });
-    const renameGroup = wrap((gid, name) => F.updateDoc(ref(`groups/${gid}`), { name: String(name).trim().slice(0, 30) }));
+    const renameGroup = wrap((gid, name) => F.updateDoc(ref(`${B}/groups/${gid}`), { name: String(name).trim().slice(0, 30) }));
 
     const deleteGroup = wrap(async (gid) => {
       for (const s of [...state.subs.values()]) if (s.ownerType === 'group' && s.ownerId === gid) await deleteSubmission(s);
       const batch = F.writeBatch(db);
-      for (const st of state.students.values()) if (st.groupId === gid) batch.update(ref(`students/${st.id}`), { groupId: null });
-      batch.delete(ref(`groups/${gid}`));
+      for (const st of state.students.values()) if (st.groupId === gid) batch.update(ref(`${B}/members/${st.id}`), { groupId: null });
+      batch.delete(ref(`${B}/groups/${gid}`));
       await batch.commit();
     });
 
@@ -897,17 +1054,17 @@
       for (const s of [...state.subs.values()]) if (s.ownerType === 'group') await deleteSubmission(s);
       const count = Math.max(1, Math.round(ids.length / n));
       const batch = F.writeBatch(db);
-      for (const g of state.groups.values()) batch.delete(ref(`groups/${g.id}`));
+      for (const g of state.groups.values()) batch.delete(ref(`${B}/groups/${g.id}`));
       const newIds = Array.from({ length: count }, () => randomId(10));
-      newIds.forEach((gid, i) => batch.set(ref(`groups/${gid}`), { name: `${i + 1}班`, sort: i + 1, members: [] }));
-      ids.forEach((sid, i) => batch.update(ref(`students/${sid}`), { groupId: newIds[i % count] }));
+      newIds.forEach((gid, i) => batch.set(ref(`${B}/groups/${gid}`), { name: `${i + 1}班`, sort: i + 1, members: [] }));
+      ids.forEach((sid, i) => batch.update(ref(`${B}/members/${sid}`), { groupId: newIds[i % count] }));
       await batch.commit();
     });
 
     // --- 課題 ---
 
     async function writeAnswers(taskId, v) {
-      await F.setDoc(ref('config/answers'), {
+      await F.setDoc(ref(`${B}/private/answers`), {
         [taskId]: {
           answers: (v.accepted?.answers || []).map((a) => String(a).trim()).filter(Boolean).slice(0, 20),
           mode: v.accepted?.mode === 'exact' ? 'exact' : 'value',
@@ -940,12 +1097,12 @@
     async function writeTaskImage(taskId, image, oldV) {
       if (image === undefined) return oldV || null;
       if (!image) {
-        if (oldV) await F.deleteDoc(ref(`tasks/${taskId}/files/image`));
+        if (oldV) await F.deleteDoc(ref(`${B}/tasks/${taskId}/files/image`));
         return null;
       }
       checkImage(image);
       const v = (oldV || 0) + 1;
-      await F.setDoc(ref(`tasks/${taskId}/files/image`), { data: image, v });
+      await F.setDoc(ref(`${B}/tasks/${taskId}/files/image`), { data: image, v });
       return v;
     }
 
@@ -954,9 +1111,9 @@
       const sort = Math.max(0, ...tasks().map((t) => t.sort || 0)) + 1;
       await writeAnswers(id, v);
       const fields = taskFields(v, null);
-      await F.setDoc(ref(`tasks/${id}`), { ...fields, imageV: null, sort, createdAt: now() });
+      await F.setDoc(ref(`${B}/tasks/${id}`), { ...fields, imageV: null, sort, createdAt: now() });
       const imageV = await writeTaskImage(id, v.image, null);
-      if (imageV) await F.updateDoc(ref(`tasks/${id}`), { imageV });
+      if (imageV) await F.updateDoc(ref(`${B}/tasks/${id}`), { imageV });
       return id;
     });
 
@@ -972,7 +1129,7 @@
         if (v.hint !== undefined) state.answers[id] = { ...cur, hint: v.hint };
       }
       const imageV = await writeTaskImage(id, v.image, old.imageV);
-      await F.updateDoc(ref(`tasks/${id}`), { ...taskFields(v, old), imageV });
+      await F.updateDoc(ref(`${B}/tasks/${id}`), { ...taskFields(v, old), imageV });
     });
 
     const rejudge = wrap(async (id) => {
@@ -996,26 +1153,27 @@
       const t = state.tasks.get(id);
       const a = state.answers[id] || {};
       let image;
-      if (t.imageV) image = await loadImage({ path: `tasks/${id}/files/image`, v: t.imageV });
+      if (t.imageV) image = await loadImage(taskImage(t));
       await createTask({ ...t, title: `${t.title}（コピー）`, status: 'draft', hintOpen: false, hint: a.hint || '', accepted: { answers: a.answers, mode: a.mode }, image });
     });
 
     const reorderTasks = wrap(async (ids) => {
       const batch = F.writeBatch(db);
-      ids.forEach((id, i) => batch.update(ref(`tasks/${id}`), { sort: i + 1 }));
+      ids.forEach((id, i) => batch.update(ref(`${B}/tasks/${id}`), { sort: i + 1 }));
       await batch.commit();
     });
 
     const deleteTask = wrap(async (id) => {
       for (const s of [...state.subs.values()]) if (s.taskId === id) await deleteSubmission(s);
       const paths = [];
-      for (const sub of ['peers', 'likes', 'help']) {
-        const snap = await F.getDocs(col(`tasks/${id}/${sub}`));
+      for (const sub of ['peers', 'likes']) {
+        const snap = await F.getDocs(col(`${B}/tasks/${id}/${sub}`));
         snap.forEach((d) => paths.push(d.ref.path));
       }
-      paths.push(`tasks/${id}/files/image`, `tasks/${id}`);
+      for (const h of state.help.values()) if (h.taskId === id) paths.push(`${B}/help/${id}__${h.studentId}`);
+      paths.push(`${B}/tasks/${id}/files/image`, `${B}/tasks/${id}`);
       await commitDeletes(paths);
-      await F.updateDoc(ref('config/answers'), { [id]: F.deleteField() });
+      await F.updateDoc(ref(`${B}/private/answers`), { [id]: F.deleteField() });
       if (state.present.taskId === id) await setPresent({ taskId: null, submissionKeys: [] });
     });
 
@@ -1030,7 +1188,7 @@
       if (s && status === 'cleared') await removeHelpFor(s);
     });
 
-    const dismissHelp = wrap((taskId, sid) => F.deleteDoc(ref(`tasks/${taskId}/help/${sid}`)));
+    const dismissHelp = wrap((taskId, sid) => F.deleteDoc(ref(`${B}/help/${taskId}__${sid}`)));
 
     // --- 提示 ---
 
@@ -1038,7 +1196,7 @@
       const next = { ...state.present, ...patch };
       next.submissionKeys = (next.submissionKeys || []).slice(0, 24);
       state.present = next;
-      await F.setDoc(ref('config/present'), next);
+      await F.setDoc(ref(`${B}/private/present`), next);
       return next;
     });
 
@@ -1059,7 +1217,7 @@
 
     const createQuiz = wrap(async (v) => {
       const id = randomId(12);
-      await F.setDoc(ref(`quizzes/${id}`), { ...quizFields(v), createdAt: now() });
+      await F.setDoc(ref(`${B}/quizzes/${id}`), { ...quizFields(v), createdAt: now() });
       return id;
     });
 
@@ -1069,15 +1227,15 @@
       if (!old) throw new Error('テストが見つかりません');
       const fields = quizFields({ ...old, ...v });
       const batch = F.writeBatch(db);
-      batch.update(ref(`quizzes/${id}`), fields);
+      batch.update(ref(`${B}/quizzes/${id}`), fields);
       if (fields.published !== !!old.published) {
-        for (const x of scoresOf(id)) batch.update(ref(`quizzes/${id}/scores/${x.studentId}`), { published: fields.published });
+        for (const x of scoresOf(id)) batch.update(ref(`${B}/scores/${id}__${x.studentId}`), { published: fields.published });
       }
       await batch.commit();
     });
 
     const deleteQuiz = wrap(async (id) => {
-      await commitDeletes([...scoresOf(id).map((x) => `quizzes/${id}/scores/${x.studentId}`), `quizzes/${id}`]);
+      await commitDeletes([...scoresOf(id).map((x) => `${B}/scores/${id}__${x.studentId}`), `${B}/quizzes/${id}`]);
     });
 
     // entries: [{ studentId, score }]（score が null なら未入力・欠席として消す）
@@ -1086,7 +1244,7 @@
       if (!q) throw new Error('テストが見つかりません');
       const writes = [];
       for (const { studentId, score } of entries) {
-        const path = `quizzes/${quizId}/scores/${studentId}`;
+        const path = `${B}/scores/${quizId}__${studentId}`;
         const old = state.scores.get(`${quizId}:${studentId}`);
         if (score === null) {
           if (old) writes.push((b) => b.delete(ref(path)));
@@ -1098,7 +1256,7 @@
         const st = state.students.get(studentId);
         const groupId = old ? old.groupId : (st && st.groupId) || null;
         const groupName = old ? old.groupName : (groupId && state.groups.get(groupId)?.name) || '';
-        writes.push((b) => b.set(ref(path), { studentId, score, groupId, groupName, published: !!q.published, updatedAt: now() }));
+        writes.push((b) => b.set(ref(path), { quizId, studentId, score, groupId, groupName, published: !!q.published, updatedAt: now() }));
       }
       for (let i = 0; i < writes.length; i += 400) {
         const batch = F.writeBatch(db);
@@ -1124,22 +1282,23 @@
       else next = { ...t, state: 'stopped' };
       state.timer = next;
       ev.emit('timer');
-      await F.setDoc(ref('live/timer'), { ...next, updatedAt: Date.now() });
+      await F.setDoc(ref(`${B}/live/timer`), { ...next, updatedAt: Date.now() });
     });
 
     return {
-      state, on: ev.on, students, groups, tasks, ownerName, submissionsOf, taskView, setTimer,
-      quizzes, scoresOf, createQuiz, updateQuiz, deleteQuiz, saveScores,
+      state, on: ev.on, students, groups, tasks, ownerName, submissionsOf, taskView, taskImage, setTimer, watchLikes, setCoTeacher,
+      quizzes, scoresOf, createQuiz, updateQuiz, deleteQuiz, saveScores, updateNumbers,
       updateSettings, addStudent, resetStudentPassword, updateStudent, deleteStudent,
       addGroup, renameGroup, deleteGroup, autoGroups,
       createTask, updateTask, rejudge, duplicateTask, reorderTasks, deleteTask,
       setSubmission, dismissHelp, setPresent,
-      stop: () => offs.forEach((f) => f()),
+      stop: () => { offs.forEach((f) => f()); if (likesOff) likesOff(); },
     };
   }
 
   window.Store = {
-    LOCAL, publicConfig, setup, login, register, logout, changePassword, resetTeacherPassword, whoami,
+    LOCAL, publicConfig, setup, teacherSignup, login, register, joinClass, logout, changePassword, resetTeacherPassword, whoami,
+    teacherClasses, studentClasses, createClass, listTeachers, teacherInvite,
     studentStore, teacherStore, loadImage, nameKey,
   };
 })();
